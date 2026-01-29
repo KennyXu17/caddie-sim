@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "plot-graph": "node scripts/plot-graph.js"
   },
   "devDependencies": {
     "vite": "^7.1.7"

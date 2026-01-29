@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { gsap } from "gsap";
+import { OrderManager, PARKING_SPOTS } from './orderSystem.js';
+import { pathfinder, collisionAvoidance, isDrivable } from './pathfinding.js';
+import { findPathTopo, isCrossingSegment, getSpotRow } from './topology.js';
 
 // === UI Setup ===
 if (!document.getElementById('main-title')) {
@@ -21,10 +24,11 @@ if (!document.getElementById('main-title')) {
   titleDiv.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
   titleDiv.style.zIndex = '10000';
   titleDiv.style.fontFamily = 'sans-serif';
+  titleDiv.style.display = 'none';
   document.body.appendChild(titleDiv);
 }
 
-// === Console UI ===
+// === Console UI === (隐藏)
 if (!document.getElementById('comment-container')) {
   const commentDiv = document.createElement('div');
   commentDiv.id = 'comment-container';
@@ -41,6 +45,7 @@ if (!document.getElementById('comment-container')) {
   commentDiv.style.padding = '16px';
   commentDiv.style.zIndex = '9999';
   commentDiv.style.fontFamily = 'sans-serif';
+  commentDiv.style.display = 'none'; // 隐藏console UI
   commentDiv.innerHTML = '<div style="font-weight:bold;font-size:18px;margin-bottom:10px;color:#0078ff;">Console</div>';
   document.body.appendChild(commentDiv);
 }
@@ -59,10 +64,12 @@ function addComment(msg) {
   container.scrollTop = container.scrollHeight;
 }
 
+// 禁用console.log输出到UI（保留浏览器控制台输出）
 const oldLog = console.log;
 console.log = function (...args) {
   oldLog.apply(console, args);
-  addComment(args.join(' '));
+  // 不再添加到UI，只输出到浏览器控制台
+  // addComment(args.join(' '));
 };
 
 // === Scene Setup ===
@@ -143,6 +150,92 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.update();
 
+// === Mouse Click to Show Coordinates ===
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+// 创建坐标显示元素
+const coordDisplay = document.createElement('div');
+coordDisplay.id = 'coordinate-display';
+coordDisplay.style.position = 'fixed';
+coordDisplay.style.background = 'rgba(0, 0, 0, 0.8)';
+coordDisplay.style.color = '#00ff00';
+coordDisplay.style.padding = '8px 12px';
+coordDisplay.style.borderRadius = '4px';
+coordDisplay.style.fontFamily = 'monospace';
+coordDisplay.style.fontSize = '14px';
+coordDisplay.style.pointerEvents = 'none';
+coordDisplay.style.zIndex = '10001';
+coordDisplay.style.display = 'none';
+coordDisplay.style.border = '1px solid #00ff00';
+document.body.appendChild(coordDisplay);
+
+// 鼠标移动时更新坐标显示位置
+let mouseX = 0;
+let mouseY = 0;
+renderer.domElement.addEventListener('mousemove', (event) => {
+  mouseX = event.clientX;
+  mouseY = event.clientY;
+  if (coordDisplay.style.display !== 'none') {
+    coordDisplay.style.left = (mouseX + 15) + 'px';
+    coordDisplay.style.top = (mouseY + 15) + 'px';
+  }
+});
+
+// 鼠标点击事件
+renderer.domElement.addEventListener('click', (event) => {
+  // 计算鼠标在归一化设备坐标中的位置
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  
+  // 更新raycaster
+  raycaster.setFromCamera(mouse, camera);
+  
+  // 创建地面平面用于检测点击位置
+  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const intersectPoint = new THREE.Vector3();
+  raycaster.ray.intersectPlane(plane, intersectPoint);
+  
+  // 显示坐标
+  coordDisplay.textContent = `📍 Clicked Position: x: ${intersectPoint.x.toFixed(2)}, y: ${intersectPoint.y.toFixed(2)}, z: ${intersectPoint.z.toFixed(2)}`;
+  coordDisplay.style.display = 'block';
+  coordDisplay.style.left = (event.clientX + 15) + 'px';
+  coordDisplay.style.top = (event.clientY + 15) + 'px';
+  
+  // 3秒后自动隐藏
+  setTimeout(() => {
+    coordDisplay.style.display = 'none';
+  }, 3000);
+  
+  // 也在控制台输出（可选）
+  console.log(`📍 Clicked Position: x: ${intersectPoint.x.toFixed(2)}, y: ${intersectPoint.y.toFixed(2)}, z: ${intersectPoint.z.toFixed(2)}`);
+});
+
+// === Entity labels (battery / demand) ===
+const labelsContainer = document.createElement('div');
+labelsContainer.id = 'entity-labels';
+labelsContainer.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:9999;';
+document.body.appendChild(labelsContainer);
+
+const _proj = new THREE.Vector3();
+function worldToScreen(x, y, z) {
+  _proj.set(x, y, z);
+  _proj.project(camera);
+  const w = window.innerWidth, h = window.innerHeight;
+  return {
+    x: (_proj.x * 0.5 + 0.5) * w,
+    y: (1 - (_proj.y * 0.5 + 0.5)) * h,
+    behind: _proj.z > 1
+  };
+}
+
+function createEntityLabel(kind) {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;transform:translate(-50%,-100%);font-size:12px;font-weight:bold;white-space:nowrap;text-shadow:0 1px 2px #000;';
+  el.dataset.kind = kind;
+  return el;
+}
+
 // === Loader ===
 const loader = new GLTFLoader();
 
@@ -152,122 +245,28 @@ const chargingRobots = [];
 const batteryStations = [];
 let parkingLot = null;
 
-// === Mouse Click Coordinate Detection ===
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
+const ROBOT_BATTERY_KWH = 100;
+const VEHICLE_BATTERY_KWH = 80;
+const LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25; // 25%
 
-function onMouseClick(event) {
-  // 将鼠标位置标准化为设备坐标 (-1 到 +1)
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
-  // 通过摄像机和鼠标位置更新射线
-  raycaster.setFromCamera(mouse, camera);
-
-  // 创建一个地平面来检测交点
-  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  const intersectPoint = new THREE.Vector3();
-  
-  if (raycaster.ray.intersectPlane(groundPlane, intersectPoint)) {
-    console.log(`📍 Clicked Position: x: ${intersectPoint.x.toFixed(2)}, y: ${intersectPoint.y.toFixed(2)}, z: ${intersectPoint.z.toFixed(2)}`);
-    
-    // 可选：添加一个可视化标记
-    const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(0.2, 16, 16),
-      new THREE.MeshStandardMaterial({ 
-        color: 0xff0000, 
-        emissive: 0xff0000, 
-        emissiveIntensity: 0.5 
-      })
-    );
-    marker.position.copy(intersectPoint);
-    marker.position.y = 0.2;
-    scene.add(marker);
-    
-    // 5秒后移除标记
-    setTimeout(() => scene.remove(marker), 5000);
-  }
-}
-
-// 添加鼠标点击事件监听器
-window.addEventListener('click', onMouseClick, false);
+// === Mouse Click Coordinate Detection === (已合并到上面的鼠标点击事件中，无需重复代码)
 
 // === Charging Robot Class ===
 class ChargingRobot {
-  constructor(model, position, id) {
+  constructor(model, position, id, homeSpot = null) {
     this.model = model;
     this.id = id;
     this.position = position;
     this.targetVehicle = null;
-    this.state = 'idle'; // idle, navigating, charging, returning, selfCharging
-    this.batteryLevel = 100; // 0-100
+    this.state = 'idle';
+    this.batteryLevel = ROBOT_BATTERY_KWH;
     this.timeline = null;
-    this.armBase = null;
-    this.armParts = null;
-    this.chargingTip = null;
     this.homePosition = { ...position };
-    this.setupArm();
-  }
-
-  setupArm() {
-    // Create charging arm structure
-    this.armBase = new THREE.Group();
-    this.armBase.position.set(0, 0.8, 0.5);
-    this.armBase.rotation.y = Math.PI / 2; // 顺时针旋转90度
-    this.model.add(this.armBase);
-
-    const whiteMetal = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      metalness: 0.3,
-      roughness: 0.3
-    });
-
-    // Upper arm
-    const upperArm = new THREE.Mesh(
-      new THREE.BoxGeometry(1.2, 0.12, 0.12),
-      whiteMetal
-    );
-    upperArm.position.x = -0.4;
-    upperArm.castShadow = true;
-    this.armBase.add(upperArm);
-
-    // Forearm
-    const forearm = new THREE.Mesh(
-      new THREE.BoxGeometry(1.0, 0.12, 0.12),
-      whiteMetal
-    );
-    forearm.position.x = -0.8;
-    forearm.castShadow = true;
-    upperArm.add(forearm);
-
-    // Wrist
-    const wrist = new THREE.Mesh(
-      new THREE.BoxGeometry(0.8, 0.12, 0.12),
-      whiteMetal
-    );
-    wrist.position.x = -0.6;
-    wrist.castShadow = true;
-    forearm.add(wrist);
-
-    // Charging tip
-    this.chargingTip = new THREE.Mesh(
-      new THREE.SphereGeometry(0.1, 16, 16),
-      new THREE.MeshStandardMaterial({
-        color: 0x00ccff,
-        emissive: 0x00ccff,
-        emissiveIntensity: 1.2,
-        metalness: 0.9,
-        roughness: 0.2
-      })
-    );
-    this.chargingTip.position.x = -0.4;
-    this.chargingTip.castShadow = true;
-    wrist.add(this.chargingTip);
-
-    this.armParts = { upperArm, forearm, wrist };
-
-    // Initially hidden
-    this.armBase.scale.x = 0;
+    this.homeSpot = homeSpot;
+    this.lastRow = 3;
+    this.lastSide = 'right';
+    this.atHome = true;
+    this.lastSpotIndex = homeSpot ? homeSpot.index : 33;
   }
 
   navigateTo(targetPosition, onComplete) {
@@ -282,11 +281,11 @@ class ChargingRobot {
     const SPEED = 3.0; // units per second
     const duration = distance / SPEED;
 
-    // Calculate rotation to face target
+    // 逆时针旋转90度为正确朝向
     const angle = Math.atan2(
       targetPosition.x - currentPos.x,
       targetPosition.z - currentPos.z
-    );
+    ) + Math.PI / 2;
 
     const tl = gsap.timeline({
       onComplete: () => {
@@ -294,7 +293,6 @@ class ChargingRobot {
       }
     });
 
-    // Rotate to face target
     tl.to(this.model.rotation, {
       y: angle,
       duration: 0.8,
@@ -315,32 +313,23 @@ class ChargingRobot {
   chargeVehicle(vehicle, onComplete) {
     this.state = 'charging';
     this.targetVehicle = vehicle;
-    const vehiclePos = vehicle.position;
-    
-    // Determine if left or right parking spot
-    const isLeftSpot = vehiclePos.z < -8.8;
-    const turnPointZ = isLeftSpot ? -8 : -4.6; // 转向点z坐标：左侧z=-8，右侧z=-4.6
-    
+    const spot = vehicle.parkingSpot;
+    if (!spot || !spot.chargePoint) {
+      if (onComplete) onComplete();
+      return gsap.timeline();
+    }
+    const cp = spot.chargePoint;
+    const chargingPos = { x: cp.x, z: cp.z, y: cp.y != null ? cp.y : 0 };
+    const ownCP = this.homeSpot && this.homeSpot.chargePoint
+      ? { x: this.homeSpot.chargePoint.x, z: this.homeSpot.chargePoint.z, y: this.homeSpot.chargePoint.y != null ? this.homeSpot.chargePoint.y : 0 }
+      : null;
     const currentPos = { x: this.model.position.x, z: this.model.position.z, y: this.model.position.y };
-    
-    // 转向点：休息位置的x坐标，转向点的z坐标（必须经过）
-    const turnPoint = { 
-      x: currentPos.x, 
-      z: turnPointZ,
-      y: 0 
-    };
-    
-    // 充电位置：车辆的x坐标，转向点的z坐标
-    const chargingPos = { 
-      x: vehiclePos.x, 
-      z: turnPointZ,
-      y: 0 
-    };
+    const SPEED = 3.0;
+    const CROSSING_YIELD_DURATION = 1.0;
+    const startSpot = this.atHome ? (this.homeSpot?.index ?? 33) : this.lastSpotIndex;
+    const endSpot = spot.index;
+    const wps = findPathTopo(startSpot, endSpot);
 
-    // 恒定速度：每秒移动3个单位
-    const SPEED = 3.0; // units per second
-
-    // Create main timeline
     const mainTl = gsap.timeline({
       onComplete: () => {
         this.state = 'idle';
@@ -349,117 +338,87 @@ class ChargingRobot {
       }
     });
 
-    // Step 1: 从休息位置移动到转向点（必须经过）
-    console.log(`🤖 Robot${this.id} Step 1: Moving from rest to turn point at z=${turnPointZ}`);
-    const distanceToTurn = Math.sqrt(
-      Math.pow(turnPoint.x - currentPos.x, 2) + Math.pow(turnPoint.z - currentPos.z, 2)
-    );
-    const durationToTurn = distanceToTurn / SPEED;
-    mainTl.to(this.model.position, {
-      x: turnPoint.x,
-      z: turnPoint.z,
-      duration: durationToTurn,
-      ease: "none" // 恒定速度
-    });
+    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
 
-    // Step 2: 在转向点旋转90度（pi/2 -> pi），然后移动到充电位置
-    console.log(`🤖 Robot${this.id} Step 2: Rotating at turn point and moving to charging position`);
-    mainTl.to(this.model.rotation, {
-      y: Math.PI, // 顺时针旋转90度：pi/2 -> pi
-      duration: 0.8,
-      ease: "power1.inOut"
-    });
-    
-    const distanceToCharge = Math.sqrt(
-      Math.pow(chargingPos.x - turnPoint.x, 2) + Math.pow(chargingPos.z - turnPoint.z, 2)
-    );
-    const durationToCharge = distanceToCharge / SPEED;
-    mainTl.to(this.model.position, {
-      x: chargingPos.x,
-      z: chargingPos.z,
-      duration: durationToCharge,
-      ease: "none" // 恒定速度
-    });
+    const addPathSegment = (from, to) => {
+      const occ = collisionAvoidance.getOccupiedPositions(`robot_${this.id}`);
+      const path = pathfinder.findPath(from, to, occ);
+      const rotDur = 0.3;
+      if (path && path.length > 0) {
+        collisionAvoidance.reservePath(path, `robot_${this.id}`, 30000);
+        for (let i = 1; i < path.length; i++) {
+          const prev = path[i - 1];
+          const curr = path[i];
+          const dist = Math.sqrt(Math.pow(curr.x - prev.x, 2) + Math.pow(curr.z - prev.z, 2));
+          const dur = dist / SPEED;
+          const angle = rot(curr.x - prev.x, curr.z - prev.z);
+          mainTl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
+          mainTl.to(this.model.position, { x: curr.x, z: curr.z, y: curr.y != null ? curr.y : 0, duration: dur, ease: "none" });
+        }
+      } else {
+        const dist = Math.sqrt(Math.pow(to.x - from.x, 2) + Math.pow(to.z - from.z, 2));
+        const dur = dist / SPEED;
+        const angle = rot(to.x - from.x, to.z - from.z);
+        mainTl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
+        mainTl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: dur, ease: "none" });
+      }
+    };
 
-    // Step 3: 旋转面向车辆（不移动位置，只在原地旋转）
-    mainTl.to(this.model.rotation, {
-      y: isLeftSpot ? Math.PI : 0, // 左侧面向-Z(180°)，右侧面向+Z(0°)
-      duration: 0.8,
-      ease: "power1.inOut",
-      onStart: () => console.log(`🤖 Robot${this.id} Step 3: Rotating to face vehicle (no movement)`)
-    });
+    const addCrossing = (from, to) => {
+      collisionAvoidance.reservePath([from, to], `robot_${this.id}`, 30000);
+      mainTl.to({}, { duration: CROSSING_YIELD_DURATION, onStart: () => console.log(`🔄 Robot${this.id} yielding before lane crossing`) });
+      const dx = to.x - from.x;
+      const dz = to.z - from.z;
+      mainTl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.4, ease: "power1.inOut" });
+      const d = Math.sqrt(dx * dx + dz * dz);
+      mainTl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: d / SPEED, ease: "none" });
+    };
 
-    // Step 4: Extend arm and charge (不靠近车辆，只伸出机械臂)
-    mainTl.to({}, { duration: 0.5, onStart: () => console.log(`🤖 Robot${this.id} extending charging arm`) });
+    const toPos = (w) => ({ x: w.x, z: w.z, y: w.y != null ? w.y : 0 });
+    let prev = currentPos;
+    if (this.atHome && ownCP) {
+      addPathSegment(prev, ownCP);
+      prev = ownCP;
+    }
+    for (let i = 1; i < wps.length; i++) {
+      const from = wps[i - 1];
+      const to = wps[i];
+      const fromP = toPos(from);
+      const toP = toPos(to);
+      if (isCrossingSegment(from, to)) {
+        addCrossing(fromP, toP);
+      } else {
+        addPathSegment(prev, toP);
+      }
+      prev = toP;
+    }
 
-    mainTl.to(this.armBase.scale, { x: 1, duration: 0.6, ease: "power2.out" });
-    mainTl.to(this.armParts.upperArm.rotation, { z: Math.PI / 18, duration: 0.6, ease: "power2.out" }, "<");
-    mainTl.to(this.armParts.forearm.rotation, { z: Math.PI / 24, duration: 0.6, ease: "power2.out" }, "<");
-    mainTl.to(this.armParts.wrist.rotation, { y: -Math.PI / 15, duration: 0.5, ease: "power2.out" }, "<");
-
-    // Charging effect
-    mainTl.to({}, { duration: 0.5, onStart: () => console.log(`🔋 Robot${this.id} charging vehicle...`) });
-    mainTl.to(this.chargingTip.material, {
-      emissiveIntensity: 2.5,
-      duration: 0.5,
-      yoyo: true,
-      repeat: 8
-    });
-
-    // Step 5: Retract arm
-    mainTl.to({}, { duration: 0.5, onStart: () => console.log(`✅ Robot${this.id} charging complete`) });
-    mainTl.to(this.armParts.wrist.rotation, { y: 0, duration: 0.4 });
-    mainTl.to(this.armParts.forearm.rotation, { z: 0, duration: 0.4 });
-    mainTl.to(this.armParts.upperArm.rotation, { z: 0, duration: 0.4 });
-    mainTl.to(this.armBase.scale, { x: 0, duration: 0.6, ease: "power1.in" });
-
-    // Step 6: 返程 - 从充电位置移动到转向点（必须经过）
-    console.log(`🤖 Robot${this.id} Step 6: Moving from charging position to turn point`);
-    
-    // 先旋转回pi方向（面向-Z方向）
-    mainTl.to(this.model.rotation, {
-      y: Math.PI, // 面向-Z方向（沿行车主干道返回）
-      duration: 0.8,
-      ease: "power1.inOut"
-    });
-    
-    // 移动到转向点
-    const returnDistanceToTurn = Math.sqrt(
-      Math.pow(turnPoint.x - chargingPos.x, 2) + Math.pow(turnPoint.z - chargingPos.z, 2)
-    );
-    const returnDurationToTurn = returnDistanceToTurn / SPEED;
-    mainTl.to(this.model.position, {
-      x: turnPoint.x,
-      z: turnPoint.z,
-      duration: returnDurationToTurn,
-      ease: "none" // 恒定速度
-    });
-
-    // Step 7: 在转向点旋转90度（pi -> pi/2），然后返回休息位置
-    console.log(`🤖 Robot${this.id} Step 7: Rotating at turn point and returning to rest position`);
-    mainTl.to(this.model.rotation, {
-      y: Math.PI / 2, // 逆时针旋转90度：pi -> pi/2
-      duration: 0.8,
-      ease: "power1.inOut"
-    });
-    
-    const returnDistanceToHome = Math.sqrt(
-      Math.pow(this.homePosition.x - turnPoint.x, 2) + Math.pow(this.homePosition.z - turnPoint.z, 2)
-    );
-    const returnDurationToHome = returnDistanceToHome / SPEED;
-    mainTl.to(this.model.position, {
-      x: this.homePosition.x,
-      z: this.homePosition.z,
-      duration: returnDurationToHome,
-      ease: "none", // 恒定速度
-      onComplete: () => {
-        console.log(`🤖 Robot${this.id} returned to rest position`);
+    const startDemand = Math.max(0, vehicle.chargeDemandKwh ?? 0);
+    const startBattery = this.batteryLevel;
+    const chargeDuration = 4;
+    const maxTransfer = Math.min(startDemand, startBattery);  // 车辆获得 = 机器人损失
+    const prog = { p: 0 };
+    mainTl.to(prog, {
+      p: 1,
+      duration: chargeDuration,
+      ease: "none",
+      onStart: () => console.log(`🤖 Robot${this.id} at charge point (service)`),
+      onUpdate: () => {
+        const transferred = maxTransfer * prog.p;
+        vehicle.chargeDemandKwh = Math.max(0, startDemand - transferred);
+        this.batteryLevel = Math.max(0, startBattery - transferred);
       }
     });
 
-    // Consume battery
-    this.batteryLevel = Math.max(0, this.batteryLevel - 15);
-
+    mainTl.to({}, {
+      duration: 0,
+      onComplete: () => {
+        this.lastRow = getSpotRow(spot.index);
+        this.lastSide = spot.side;
+        this.lastSpotIndex = spot.index;
+        this.atHome = false;
+      }
+    });
     return mainTl;
   }
 
@@ -475,41 +434,19 @@ class ChargingRobot {
     };
 
     const navTl = this.navigateTo(chargingPos, () => {
-      // After navigation, start self-charging sequence
       const chargeTl = gsap.timeline({
         onComplete: () => {
           this.state = 'idle';
-          this.batteryLevel = 100;
+          this.batteryLevel = ROBOT_BATTERY_KWH;
           if (onComplete) onComplete();
         }
       });
-
-      // Rotate to face station
-      chargeTl.to(this.model.rotation, {
-        y: Math.PI,
-        duration: 0.8,
-        ease: "power1.inOut"
-      });
-
-      // Self-charging animation
-      chargeTl.to({}, { duration: 0.5, onStart: () => console.log(`🔌 Robot${this.id} self-charging at station...`) });
-
-      // Visual effect - arm extends backward to connect
-      chargeTl.to(this.armBase.scale, { x: 1, duration: 0.6, ease: "power2.out" });
-      chargeTl.to(this.armParts.upperArm.rotation, { z: -Math.PI / 12, duration: 0.6, ease: "power2.out" }, "<");
-
-      // Charging effect
-      chargeTl.to(this.chargingTip.material, {
-        emissiveIntensity: 2.0,
-        duration: 0.3,
-        yoyo: true,
-        repeat: 15
-      });
-
-      // Retract
-      chargeTl.to({}, { duration: 0.5, onStart: () => console.log(`✅ Robot${this.id} self-charging complete`) });
-      chargeTl.to(this.armParts.upperArm.rotation, { z: 0, duration: 0.4 });
-      chargeTl.to(this.armBase.scale, { x: 0, duration: 0.6, ease: "power1.in" });
+      const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
+      const dx = stationPos.x - chargingPos.x;
+      const dz = stationPos.z - chargingPos.z;
+      chargeTl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.8, ease: "power1.inOut" });
+      chargeTl.to({}, { duration: 2, onStart: () => console.log(`🔌 Robot${this.id} self-charging at station...`) });
+      chargeTl.to({}, { duration: 0, onComplete: () => console.log(`✅ Robot${this.id} self-charging complete`) });
     });
 
     return navTl;
@@ -541,7 +478,82 @@ class ChargingRobot {
   }
 
   needsRecharge() {
-    return this.batteryLevel < 30;
+    return this.batteryLevel < LOW_BATTERY_KWH;
+  }
+
+  returnHomeAndCharge(onComplete) {
+    this.state = 'returning';
+    const homeSpot = this.homeSpot;
+    const homeRow = homeSpot ? getSpotRow(homeSpot.index) : 3;
+    const homeSide = homeSpot?.side ?? 'right';
+    const SPEED = 3.0;
+    const CROSSING_YIELD = 1.0;
+    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
+    const currentPos = { x: this.model.position.x, z: this.model.position.z, y: this.model.position.y };
+    const startSpot = this.lastSpotIndex;
+    const endSpot = homeSpot?.index ?? 33;
+    const wps = findPathTopo(startSpot, endSpot);
+
+    const addPathSegment = (from, to) => {
+      const occ = collisionAvoidance.getOccupiedPositions(`robot_${this.id}`);
+      const path = pathfinder.findPath(from, to, occ);
+      const rotDur = 0.3;
+      if (path && path.length > 0) {
+        collisionAvoidance.reservePath(path, `robot_${this.id}`, 30000);
+        for (let i = 1; i < path.length; i++) {
+          const prev = path[i - 1];
+          const curr = path[i];
+          const dist = Math.sqrt(Math.pow(curr.x - prev.x, 2) + Math.pow(curr.z - prev.z, 2));
+          const dur = dist / SPEED;
+          const angle = rot(curr.x - prev.x, curr.z - prev.z);
+          tl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
+          tl.to(this.model.position, { x: curr.x, z: curr.z, y: curr.y != null ? curr.y : 0, duration: dur, ease: "none" });
+        }
+      } else {
+        const dist = Math.sqrt(Math.pow(to.x - from.x, 2) + Math.pow(to.z - from.z, 2));
+        const dur = dist / SPEED;
+        const angle = rot(to.x - from.x, to.z - from.z);
+        tl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
+        tl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: dur, ease: "none" });
+      }
+    };
+    const addCrossing = (from, to) => {
+      collisionAvoidance.reservePath([from, to], `robot_${this.id}`, 30000);
+      tl.to({}, { duration: CROSSING_YIELD });
+      const dx = to.x - from.x;
+      const dz = to.z - from.z;
+      tl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.4, ease: "power1.inOut" });
+      const d = Math.sqrt(dx * dx + dz * dz);
+      tl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: d / SPEED, ease: "none" });
+    };
+
+    const tl = gsap.timeline({
+      onComplete: () => {
+        this.state = 'idle';
+        this.lastRow = homeRow;
+        this.lastSide = homeSide;
+        this.atHome = true;
+        this.lastSpotIndex = endSpot;
+        if (onComplete) onComplete();
+      }
+    });
+
+    const toPos = (w) => ({ x: w.x, z: w.z, y: w.y != null ? w.y : 0 });
+    let prev = currentPos;
+    for (let i = 1; i < wps.length; i++) {
+      const from = wps[i - 1];
+      const to = wps[i];
+      const fromP = toPos(from);
+      const toP = toPos(to);
+      if (isCrossingSegment(from, to)) {
+        addCrossing(fromP, toP);
+      } else {
+        addPathSegment(prev, toP);
+      }
+      prev = toP;
+    }
+    addPathSegment(prev, this.homePosition);
+    return tl;
   }
 }
 
@@ -564,43 +576,18 @@ loader.load(
   (err) => console.error('❌ Parking lot load error:', err)
 );
 
-// === Load Battery Stations ===
-const batteryPositions = [
-  { x: 13, y: 1,z: -13 },
-  // { x: 14.5, z: -13 },
-];
-
-batteryPositions.forEach((pos, idx) => {
-  loader.load(
-    '/mid_caddie.glb',
-    (gltf) => {
-      const battery = gltf.scene;
-      battery.scale.set(2, 2, 2);
-      battery.position.set(pos.x, pos.y, pos.z);
-      battery.traverse((child) => {
-        if (child.isMesh) {
-          child.material.emissive = new THREE.Color(child.material.color);
-          child.material.emissiveIntensity = 0.2;
-          child.material.metalness = 0.1;
-          child.material.roughness = 0.1;
-          child.castShadow = true;
-          child.receiveShadow = true;
-        }
-      });
-      scene.add(battery);
-      batteryStations.push({ model: battery, position: pos, available: true });
-      console.log(`🔋 Battery station ${idx + 1} loaded at (${pos.x}, ${pos.z})`);
-    },
-    undefined,
-    (err) => console.error(`❌ Battery station ${idx + 1} load error:`, err)
-  );
-});
+// 已移除充电站蓝色立方体；小 caddie 在 33、34 车位上自动充电
 
 // === Load Charging Robots (Small Caddie) ===
-const robotPositions = [
-  { x: 11.20, y: 0.00, z: -10.31 },  // Robot 1 initial/rest position
-  { x: 14.58, y: 0.00, z: -10.39 },  // Robot 2 initial/rest position
-];
+// 小机器人初始位置：33、34 车位中心；出发/返回必须经过所属车位的 charge point
+const spot33 = PARKING_SPOTS.find((s) => s.index === 33);
+const spot34 = PARKING_SPOTS.find((s) => s.index === 34);
+const robotHomeSpots = [spot33, spot34];
+const robotPositions = robotHomeSpots.map((s) => ({
+  x: s.x,
+  y: s.y != null ? s.y : 0,
+  z: s.z
+}));
 
 robotPositions.forEach((pos, idx) => {
   console.log(`📦 Attempting to load robot ${idx + 1} from /small_caddie.glb`);
@@ -615,7 +602,7 @@ robotPositions.forEach((pos, idx) => {
       robotModel.scale.set(1, 1, 1);
       robotModel.position.set(pos.x, pos.y, pos.z);
       // Set initial rotation to pi/2 (90 degrees, facing +X direction)
-      robotModel.rotation.y = Math.PI / 2;
+      robotModel.rotation.y = Math.PI / 2; // 初始朝向，逆时针90度
       robotModel.traverse((obj) => {
         if (obj.isMesh) {
           obj.castShadow = true;
@@ -674,7 +661,10 @@ robotPositions.forEach((pos, idx) => {
       });
       scene.add(robotModel);
 
-      const robot = new ChargingRobot(robotModel, pos, idx + 1);
+      const robot = new ChargingRobot(robotModel, pos, idx + 1, robotHomeSpots[idx]);
+      const bl = createEntityLabel('battery');
+      labelsContainer.appendChild(bl);
+      robot.batteryLabel = bl;
       chargingRobots.push(robot);
       console.log(`🤖 Charging Robot ${idx + 1} loaded at (${pos.x}, ${pos.y}, ${pos.z})`);
       console.log(`   Initial rotation: y = ${robotModel.rotation.y} (${(robotModel.rotation.y * 180 / Math.PI).toFixed(1)}°)`);
@@ -685,8 +675,8 @@ robotPositions.forEach((pos, idx) => {
       if (robot.state !== 'idle') {
         console.warn(`⚠️ Robot ${idx + 1} not in idle state! Current state: ${robot.state}`);
       }
-      if (robot.batteryLevel <= 30) {
-        console.warn(`⚠️ Robot ${idx + 1} battery too low! Current: ${robot.batteryLevel}%`);
+      if (robot.batteryLevel <= LOW_BATTERY_KWH) {
+        console.warn(`⚠️ Robot ${idx + 1} battery low: ${robot.batteryLevel.toFixed(1)} kWh`);
       }
     },
     (xhr) => {
@@ -716,7 +706,10 @@ robotPositions.forEach((pos, idx) => {
           });
           scene.add(robotModel);
 
-          const robot = new ChargingRobot(robotModel, pos, idx + 1);
+          const robot = new ChargingRobot(robotModel, pos, idx + 1, robotHomeSpots[idx]);
+          const bl = createEntityLabel('battery');
+          labelsContainer.appendChild(bl);
+          robot.batteryLabel = bl;
           chargingRobots.push(robot);
           console.log(`🤖 Charging Robot ${idx + 1} loaded (fallback) at (${pos.x}, ${pos.y}, ${pos.z})`);
           console.log(`   Initial rotation: y = ${robotModel.rotation.y} (${(robotModel.rotation.y * 180 / Math.PI).toFixed(1)}°)`);
@@ -732,32 +725,23 @@ robotPositions.forEach((pos, idx) => {
   );
 });
 
-// === Define 10 Parking Spots ===
-// 左侧5个停车位区域：左上(-18.34, -14.59) 右下(-2.59, -8.81)
-// 右侧5个停车位区域：左上(-18.25, -3.82) 右下(-2.69, 1.79)
-// 计算：左侧宽度=15.75，每个车位宽度=3.15，中心z=-11.7
-//      右侧宽度=15.56，每个车位宽度=3.112，中心z=-1.015
-const parkingSpots = [
-  // 左侧5个停车位（从左到右，z坐标在-14.59到-8.81之间，取中心-11.7）
-  { x: -18.34 + 3.15 * 0.5, z: -11.7, y: 1, side: 'left', index: 0 },   // 左侧第1个: x=-16.765
-  { x: -18.34 + 3.15 * 1.5, z: -11.7, y: 1, side: 'left', index: 1 },   // 左侧第2个: x=-13.615
-  { x: -18.34 + 3.15 * 2.5, z: -11.7, y: 1, side: 'left', index: 2 },   // 左侧第3个: x=-10.465
-  { x: -18.34 + 3.15 * 3.5, z: -11.7, y: 1, side: 'left', index: 3 },   // 左侧第4个: x=-7.315
-  { x: -18.34 + 3.15 * 4.5, z: -11.7, y: 1, side: 'left', index: 4 },   // 左侧第5个: x=-4.165
-  // 右侧5个停车位（从左到右，z坐标在-3.82到1.79之间，取中心-1.015）
-  { x: -18.25 + 3.112 * 0.5, z: -1.015, y: 1, side: 'right', index: 5 }, // 右侧第1个: x=-16.694
-  { x: -18.25 + 3.112 * 1.5, z: -1.015, y: 1, side: 'right', index: 6 }, // 右侧第2个: x=-13.582
-  { x: -18.25 + 3.112 * 2.5, z: -1.015, y: 1, side: 'right', index: 7 }, // 右侧第3个: x=-10.47
-  { x: -18.25 + 3.112 * 3.5, z: -1.015, y: 1, side: 'right', index: 8 }, // 右侧第4个: x=-7.358
-  { x: -18.25 + 3.112 * 4.5, z: -1.015, y: 1, side: 'right', index: 9 }, // 右侧第5个: x=-4.246
-];
+// === Define 44 Parking Spots ===
+// 使用从 orderSystem.js 导入的44个停车位
+const parkingSpots = PARKING_SPOTS.map(spot => ({
+  ...spot,
+  y: spot.y || 1 // 确保y坐标为1
+}));
 
-// Track which parking spots are occupied
+// Track which parking spots are occupied (保持兼容性)
 const occupiedSpots = new Set();
+
+// === Initialize Order Manager ===
+const robotInitialPositions = robotPositions.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+const orderManager = new OrderManager(robotInitialPositions);
 
 // === Visualize Parking Spots (for debugging) ===
 function visualizeParkingSpots() {
-  parkingSpots.forEach((spot, idx) => {
+  parkingSpots.forEach((spot) => {
     // Create a function to create text sprite with circle
     function createNumberLabelWithCircle(number, fontSize = 120) {
       const canvas = document.createElement('canvas');
@@ -820,53 +804,60 @@ function visualizeParkingSpots() {
     }
     
     // Create number label on the ground
-    const numberLabel = createNumberLabelWithCircle(idx + 1, 130);
+    const numberLabel = createNumberLabelWithCircle(spot.index, 130);
     numberLabel.position.set(spot.x, 0.01, spot.z);
     scene.add(numberLabel);
     
-    console.log(`📍 Parking spot ${idx + 1} (${spot.side}): (${spot.x.toFixed(2)}, ${spot.z.toFixed(2)})`);
+    console.log(`📍 Parking spot ${spot.index} (${spot.side}): (${spot.x.toFixed(2)}, ${spot.z.toFixed(2)})`);
   });
   console.log(`✅ Visualized ${parkingSpots.length} parking spots with number labels on ground`);
 }
 
-// === Load Vehicles ===
+// === Visualize Charge Points ===
+function visualizeChargePoints() {
+  const markerGeom = new THREE.CylinderGeometry(0.35, 0.35, 0.04, 24);
+  const markerMat = new THREE.MeshBasicMaterial({ color: 0xff9800 });
+  parkingSpots.forEach((spot) => {
+    if (!spot.chargePoint) return;
+    const cp = spot.chargePoint;
+    const marker = new THREE.Mesh(markerGeom, markerMat);
+    marker.position.set(cp.x, 0.02, cp.z);
+    marker.rotation.x = 0;
+    marker.rotation.z = 0;
+    scene.add(marker);
+  });
+  console.log(`✅ Visualized ${parkingSpots.length} charge points on map`);
+}
+
+// === Load Vehicles with Order System ===
 function createVehicleSequence() {
   let vehicleCounter = 0;
 
-  function spawnVehicle() {
+  function spawnVehicleFromOrder() {
+    // 使用订单系统创建新订单
+    const order = orderManager.createOrder();
+    if (!order) {
+      console.log('⚠️ No available parking spots, waiting...');
+      setTimeout(() => spawnVehicleFromOrder(), 5000);
+      return;
+    }
+    
     vehicleCounter++;
+    const selectedSpot = order.parkingSpot;
+    const parkingSpotIndex = selectedSpot.index - 1; // 转换为0-based索引（用于兼容性）
     
-    // Find an available parking spot
-    const availableSpots = parkingSpots.filter((_, idx) => !occupiedSpots.has(idx));
-    if (availableSpots.length === 0) {
-      console.log('⚠️ All parking spots are occupied, waiting...');
-      setTimeout(() => spawnVehicle(), 5000); // Retry in 5 seconds
-      return;
-    }
-    
-    // Randomly select an available spot
-    const spotIndex = Math.floor(Math.random() * availableSpots.length);
-    const selectedSpot = availableSpots[spotIndex];
-    const parkingSpotIndex = parkingSpots.findIndex(spot => 
-      spot.x === selectedSpot.x && spot.z === selectedSpot.z && spot.side === selectedSpot.side
-    );
-    
-    if (parkingSpotIndex === -1) {
-      console.error(`❌ ERROR: Could not find parking spot index for spot at (${selectedSpot.x}, ${selectedSpot.z})`);
-      setTimeout(() => spawnVehicle(), 2000);
-      return;
-    }
-    
+    // 更新occupiedSpots以保持兼容性
     occupiedSpots.add(parkingSpotIndex);
-    console.log(`🅿️ Vehicle ${vehicleCounter} assigned to spot ${parkingSpotIndex + 1} (${selectedSpot.side} side, index ${selectedSpot.index + 1})`);
+    console.log(`🅿️ Vehicle ${vehicleCounter} assigned to spot ${selectedSpot.index} (${selectedSpot.side} side) via Order ${order.id}`);
     
     loader.load(
       '/red_car.glb',
       (gltf) => {
         const car = gltf.scene.clone();
-        car.scale.set(0.008, 0.008, 0.008);
-        car.position.set(-23, 1, 5);
-        car.rotation.y = Math.PI;
+        car.scale.set(0.007, 0.007, 0.007);
+        // 从入口进入，初始面向z负方向
+        car.position.set(-23.24, 0.9, 6.69);
+        car.rotation.y = Math.PI; // 面向z负方向
         car.traverse((obj) => {
           if (obj.isMesh) {
             obj.castShadow = true;
@@ -884,123 +875,167 @@ function createVehicleSequence() {
         const vehicle = {
           model: car,
           position: targetParkingSpot,
+          parkingSpot: selectedSpot,
           id: vehicleCounter,
-          needsCharging: true
+          orderId: order.id,
+          needsCharging: true,
+          chargeDemandKwh: 10 + Math.random() * 10  // 10–20 kWh
         };
+        const dl = createEntityLabel('demand');
+        labelsContainer.appendChild(dl);
+        vehicle.demandLabel = dl;
         vehicles.push(vehicle);
+        orderManager.assignVehicle(order.id, vehicleCounter);
 
         console.log(`🚗 Vehicle ${vehicleCounter} entering parking lot`);
-        console.log(`   Target spot: ${selectedSpot.side} side, index ${selectedSpot.index + 1} at (${targetParkingSpot.x.toFixed(2)}, ${targetParkingSpot.z.toFixed(2)})`);
+        console.log(`   Target spot: ${selectedSpot.side} side, index ${selectedSpot.index} at (${targetParkingSpot.x.toFixed(2)}, ${targetParkingSpot.z.toFixed(2)})`);
 
-        // Calculate lane position - middle lane is between z = -4 and z = -8.8
-        const middleLaneZCenter = (-4 + -8.8) / 2; // -6.4
-        const laneZ = middleLaneZCenter; // 使用中间过道中心
-
-        // 恒定速度：每秒移动4个单位（车辆比机器人稍快）
-        const VEHICLE_SPEED = 4.0; // units per second
-
-        // Animate vehicle entering and parking
+        // 恒定速度：每秒移动4个单位
+        const VEHICLE_SPEED = 4.0;
+        
+        // 判断目标车位：25-44车位需要z=-6.8转向，1-24车位需要z=-22.8转向
+        const isLowerSpots = selectedSpot.index >= 25 && selectedSpot.index <= 44;
+        const turnZ = isLowerSpots ? -6.8 : -22.8;
+        
+        // 入口位置
+        const entryX = -23.24;
+        const entryZ = 6.69;
+        
+        // 计算进入路径
         const tl = gsap.timeline({
           onComplete: () => {
-            // Verify vehicle is at the correct parking spot
-            const actualX = car.position.x;
-            const actualZ = car.position.z;
-            const expectedX = targetParkingSpot.x;
-            const expectedZ = targetParkingSpot.z;
-            const distance = Math.sqrt(
-              Math.pow(actualX - expectedX, 2) + Math.pow(actualZ - expectedZ, 2)
-            );
-            
-            console.log(`🚗 Vehicle ${vehicleCounter} parked at ${selectedSpot.side} side spot ${selectedSpot.index + 1}`);
-            console.log(`   Expected: (${expectedX.toFixed(2)}, ${expectedZ.toFixed(2)})`);
-            console.log(`   Actual: (${actualX.toFixed(2)}, ${actualZ.toFixed(2)})`);
-            console.log(`   Distance error: ${distance.toFixed(2)}`);
-            
-            if (distance > 1.0) {
-              console.warn(`⚠️ Vehicle ${vehicleCounter} is not at the expected parking spot!`);
-            }
-            
+            console.log(`🚗 Vehicle ${vehicleCounter} parked at ${selectedSpot.side} side spot ${selectedSpot.index}`);
             assignRobotToVehicle(vehicle);
           }
         });
-
-        // Enter parking lot - move to middle lane center (z = -6.4)
-        const startX = car.position.x;
-        const startZ = car.position.z;
-        const distance1 = Math.sqrt(Math.pow(-23 - startX, 2) + Math.pow(laneZ - startZ, 2));
-        tl.to(car.position, { 
-          x: -23, 
-          z: laneZ, 
-          duration: distance1 / VEHICLE_SPEED, 
-          ease: "none" // 恒定速度
-        });
-        tl.to(car.rotation, { y: Math.PI / 2, duration: 1.2, ease: "power1.inOut" });
         
-        // Move along main lane to the x position of the parking spot
-        const distance2 = Math.abs(targetParkingSpot.x - (-23));
-        tl.to(car.position, { 
-          x: targetParkingSpot.x, 
-          z: laneZ, 
-          duration: distance2 / VEHICLE_SPEED, 
-          ease: "none" // 恒定速度
+        // Step 1: 从入口往z负方向移动到转向点（保持初始方向Math.PI，面向z负方向）
+        const distance1 = Math.abs(entryZ - turnZ);
+        tl.to(car.position, {
+          x: entryX,
+          z: turnZ,
+          duration: distance1 / VEHICLE_SPEED,
+          ease: "none"
         });
         
-        // Turn towards parking spot (左侧朝下180度，右侧朝上0度)
-        tl.to(car.rotation, { y: selectedSpot.side === 'left' ? Math.PI : 0, duration: 1.5, ease: "power1.inOut" });
+        // Step 2: 在转向点顺时针旋转90度（右转：Math.PI -> Math.PI/2，面向+x方向）
+        tl.to(car.rotation, {
+          y: Math.PI / 2, // 顺时针旋转90度（面向+x方向）
+          duration: 1.2,
+          ease: "power1.inOut"
+        });
         
-        // Move into parking spot
-        const distance3 = Math.abs(targetParkingSpot.z - laneZ);
-        tl.to(car.position, { 
-          x: targetParkingSpot.x, 
-          z: targetParkingSpot.z, 
-          duration: distance3 / VEHICLE_SPEED, 
-          ease: "none" // 恒定速度
+        // Step 3: 前进到目标车位的x坐标位置
+        const distance2 = Math.abs(targetParkingSpot.x - entryX);
+        tl.to(car.position, {
+          x: targetParkingSpot.x,
+          z: turnZ,
+          duration: distance2 / VEHICLE_SPEED,
+          ease: "none"
+        });
+        
+        // Step 4: 根据车位方向旋转（左侧车位左转180度，右侧车位右转0度）
+        const turnAngle = selectedSpot.side === 'left' ? Math.PI : 0;
+        tl.to(car.rotation, {
+          y: turnAngle,
+          duration: 1.2,
+          ease: "power1.inOut"
+        });
+        
+        // Step 5: 前进进入车位
+        const distance3 = Math.abs(targetParkingSpot.z - turnZ);
+        tl.to(car.position, {
+          x: targetParkingSpot.x,
+          z: targetParkingSpot.z,
+          y: targetParkingSpot.y || 1,
+          duration: distance3 / VEHICLE_SPEED,
+          ease: "none"
         });
 
         // After charging, vehicle leaves
         const checkAndLeave = () => {
           if (!vehicle.needsCharging) {
+            const VEHICLE_SPEED = 4.0;
             const leaveTl = gsap.timeline({
               onComplete: () => {
+                if (vehicle.demandLabel && vehicle.demandLabel.parentNode) vehicle.demandLabel.remove();
                 scene.remove(car);
                 const index = vehicles.indexOf(vehicle);
                 if (index > -1) vehicles.splice(index, 1);
                 // Free up the parking spot
                 occupiedSpots.delete(parkingSpotIndex);
-                console.log(`🚗 Vehicle ${vehicleCounter} left, spot ${selectedSpot.side} side ${selectedSpot.index + 1} is now available`);
+                // 完成订单
+                if (vehicle.orderId) {
+                  orderManager.completeOrder(vehicle.orderId);
+                }
+                // 移除占用位置
+                collisionAvoidance.removeOccupiedPosition(`vehicle_${vehicleCounter}`);
+                console.log(`🚗 Vehicle ${vehicleCounter} left, spot ${selectedSpot.index} is now available`);
               }
             });
-
-            // Back out of parking spot to middle lane
-            const middleLaneZCenter = (-4 + -8.8) / 2; // -6.4
-            const exitLaneZ = middleLaneZCenter;
-            const VEHICLE_SPEED = 4.0; // units per second
             
-            const exitDistance1 = Math.abs(targetParkingSpot.z - exitLaneZ);
-            leaveTl.to(car.position, { 
-              x: targetParkingSpot.x, 
-              z: exitLaneZ, 
-              duration: exitDistance1 / VEHICLE_SPEED, 
-              ease: "none" // 恒定速度
-            });
-            leaveTl.to(car.rotation, { y: Math.PI / 2, duration: 1.2, ease: "power1.inOut" });
+            // 判断目标车位，确定离开时的转向点z坐标
+            const isLowerSpots = selectedSpot.index >= 25 && selectedSpot.index <= 44;
+            const exitTurnZ = isLowerSpots ? -6.8 : -22.8;
             
-            const exitDistance2 = Math.abs(20.5 - targetParkingSpot.x);
-            leaveTl.to(car.position, { 
-              x: 20.5, 
-              z: exitLaneZ, 
-              duration: exitDistance2 / VEHICLE_SPEED, 
-              ease: "none" // 恒定速度
-            });
-            leaveTl.to(car.rotation, { y: 0, duration: 0.8, ease: "power1.inOut" });
+            // Step 1: 先出车位，返回到转向点的z坐标
+            // 车辆在车位中，需要先旋转到可以退出的方向
+            const currentRotation = car.rotation.y;
+            const exitBackRotation = selectedSpot.side === 'left' ? Math.PI : 0; // 左侧车位面向-z，右侧车位面向+z
             
-            const exitDistance3 = Math.abs(5 - exitLaneZ);
-            leaveTl.to(car.position, { 
-              x: 20.5, 
-              z: 5, 
-              duration: exitDistance3 / VEHICLE_SPEED, 
-              ease: "none" // 恒定速度
+            // 如果车辆不在正确的退出方向，先旋转
+            if (Math.abs(currentRotation - exitBackRotation) > 0.1) {
+              leaveTl.to(car.rotation, {
+                y: exitBackRotation,
+                duration: 1.2,
+                ease: "power1.inOut"
+              });
+            }
+            
+            // 退出车位到转向点的z坐标
+            const exitDistance1 = Math.abs(targetParkingSpot.z - exitTurnZ);
+            leaveTl.to(car.position, {
+              x: targetParkingSpot.x,
+              z: exitTurnZ,
+              duration: exitDistance1 / VEHICLE_SPEED,
+              ease: "none"
             });
+            
+            // Step 2: 旋转面向x正方向
+            leaveTl.to(car.rotation, {
+              y: Math.PI / 2, // 面向+x方向
+              duration: 1.2,
+              ease: "power1.inOut"
+            });
+            
+            // Step 3: 往x正方向移动到离开位置的x坐标
+            const exitX = 20.63;
+            const exitZ = 6.69;
+            const exitDistance2 = Math.abs(exitX - targetParkingSpot.x);
+            leaveTl.to(car.position, {
+              x: exitX,
+              z: exitTurnZ,
+              duration: exitDistance2 / VEHICLE_SPEED,
+              ease: "none"
+            });
+            
+            // Step 4: 在离开位置x坐标处顺时针旋转90度（面向z正方向）
+            leaveTl.to(car.rotation, {
+              y: 0, // 顺时针旋转90度：pi/2 -> 0（面向+z方向）
+              duration: 1.2,
+              ease: "power1.inOut"
+            });
+            
+            // Step 5: 往z正方向移动到离开位置
+            const exitDistance3 = Math.abs(exitZ - exitTurnZ);
+            leaveTl.to(car.position, {
+              x: exitX,
+              z: exitZ,
+              duration: exitDistance3 / VEHICLE_SPEED,
+              ease: "none"
+            });
+            
+            // 最后隐藏车辆
             leaveTl.to(car.position, { y: -1, duration: 0.5, ease: "power1.inOut" });
           } else {
             // Check again in 2 seconds if still charging
@@ -1016,63 +1051,57 @@ function createVehicleSequence() {
     );
   }
 
-  // Spawn vehicles periodically
-  setTimeout(() => spawnVehicle(), 5000); // First vehicle after 5 seconds
-  setInterval(() => {
-    if (vehicles.length < 5) { // Limit concurrent vehicles
-      spawnVehicle();
-    }
-  }, 35000); // New vehicle every 35 seconds
+  // Spawn vehicles periodically using order system
+  function scheduleNextOrder() {
+    const delay = 10000 + Math.random() * 5000; // 10-15秒随机延迟
+    setTimeout(() => {
+      if (vehicles.length < 10) { // Limit concurrent vehicles
+        spawnVehicleFromOrder();
+      }
+      scheduleNextOrder();
+    }, delay);
+  }
+  
+  // 启动订单生成
+  setTimeout(() => scheduleNextOrder(), 5000); // 5秒后开始
 }
 
-// === Robot Assignment Logic ===
+function totalDemandKwh() {
+  return vehicles
+    .filter(v => v.needsCharging)
+    .reduce((s, v) => s + (v.chargeDemandKwh ?? 0), 0);
+}
+
 function assignRobotToVehicle(vehicle) {
-  // Debug: Log robot states
   console.log(`🔍 Looking for available robot. Total robots: ${chargingRobots.length}`);
+  const total = totalDemandKwh();
   chargingRobots.forEach((robot, idx) => {
-    console.log(`  Robot ${idx + 1}: state=${robot.state}, battery=${robot.batteryLevel}`);
+    console.log(`  Robot ${idx + 1}: state=${robot.state}, battery=${robot.batteryLevel.toFixed(1)} kWh`);
   });
-  
-  // Find available robot (not charging, not self-charging, has battery)
-  let availableRobot = chargingRobots.find(
-    robot => robot.state === 'idle' && robot.batteryLevel > 30
-  );
+
+  let availableRobot = chargingRobots.find(robot => {
+    if (robot.state !== 'idle') return false;
+    if (robot.batteryLevel <= LOW_BATTERY_KWH) return false;
+    if (robot.atHome && robot.batteryLevel < ROBOT_BATTERY_KWH) return false;
+    if (robot.batteryLevel < total) return false;
+    return true;
+  });
 
   if (!availableRobot) {
     console.log('⚠️ No available robots, vehicle will wait... Retrying in 2 seconds...');
-    // Retry after a short delay in case robots are still loading
-    setTimeout(() => {
-      assignRobotToVehicle(vehicle);
-    }, 2000);
+    setTimeout(() => assignRobotToVehicle(vehicle), 2000);
     return;
   }
 
-  // Check if robot needs recharge first
-  if (availableRobot.needsRecharge()) {
-    const station = batteryStations.find(s => s.available);
-    if (station) {
-      station.available = false;
-      availableRobot.selfCharge(station, () => {
-        station.available = true;
-        assignRobotToVehicle(vehicle);
-      });
-      return;
-    }
-  }
-
-  // Charge the vehicle (return path is handled inside chargeVehicle)
   availableRobot.chargeVehicle(vehicle, () => {
     vehicle.needsCharging = false;
-
-    // Check if robot needs recharge after returning to rest position
-    if (availableRobot.needsRecharge()) {
-      const station = batteryStations.find(s => s.available);
-      if (station) {
-        station.available = false;
-        availableRobot.selfCharge(station, () => {
-          station.available = true;
-        });
-      }
+    const t = totalDemandKwh();
+    if (
+      availableRobot.batteryLevel < LOW_BATTERY_KWH ||
+      availableRobot.batteryLevel < t ||
+      t === 0
+    ) {
+      availableRobot.returnHomeAndCharge(() => {});
     }
   });
 }
@@ -1098,9 +1127,6 @@ setTimeout(() => {
   console.log(`📊 System status: ${chargingRobots.length} robots, ${batteryStations.length} battery stations`);
   console.log(`🅿️ Total parking spots: ${parkingSpots.length}`);
   
-  // Visualize parking spots
-  visualizeParkingSpots();
-  
   if (chargingRobots.length === 0) {
     console.warn('⚠️ WARNING: No robots loaded yet! Vehicles may wait...');
     console.warn('   Check the console above for loading errors');
@@ -1112,6 +1138,63 @@ setTimeout(() => {
 // === Animation Loop ===
 function animate() {
   requestAnimationFrame(animate);
+  
+  const LABEL_Y_OFFSET = 2.2;
+
+  vehicles.forEach(vehicle => {
+    if (vehicle.model && vehicle.model.position) {
+      collisionAvoidance.addOccupiedPosition(
+        { x: vehicle.model.position.x, z: vehicle.model.position.z },
+        `vehicle_${vehicle.id}`
+      );
+    }
+    if (vehicle.demandLabel && vehicle.model && vehicle.model.position) {
+      const p = vehicle.model.position;
+      const s = worldToScreen(p.x, p.y + LABEL_Y_OFFSET, p.z);
+      vehicle.demandLabel.style.display = s.behind ? 'none' : 'block';
+      vehicle.demandLabel.style.left = s.x + 'px';
+      vehicle.demandLabel.style.top = s.y + 'px';
+      const d = (vehicle.chargeDemandKwh ?? 0);
+      const pct = Math.min(100, Math.round((d / VEHICLE_BATTERY_KWH) * 100));
+      vehicle.demandLabel.textContent = `${pct}%`;
+      vehicle.demandLabel.style.color = pct <= 20 ? '#22c55e' : '#ef4444';
+    }
+  });
+  
+  chargingRobots.forEach(robot => {
+    if (robot.model && robot.model.position) {
+      collisionAvoidance.addOccupiedPosition(
+        { x: robot.model.position.x, z: robot.model.position.z },
+        `robot_${robot.id}`
+      );
+    }
+    if (robot.batteryLabel && robot.model && robot.model.position) {
+      const p = robot.model.position;
+      const s = worldToScreen(p.x, p.y + LABEL_Y_OFFSET, p.z);
+      robot.batteryLabel.style.display = s.behind ? 'none' : 'block';
+      robot.batteryLabel.style.left = s.x + 'px';
+      robot.batteryLabel.style.top = s.y + 'px';
+      const bpct = Math.min(100, Math.round((robot.batteryLevel / ROBOT_BATTERY_KWH) * 100));
+      robot.batteryLabel.textContent = `${bpct}%`;
+      robot.batteryLabel.style.color = bpct > 40 ? '#22c55e' : '#ef4444';
+    }
+    if (robot.state === 'idle' && robot.atHome && robot.homePosition) {
+      const dx = robot.model.position.x - robot.homePosition.x;
+      const dz = robot.model.position.z - robot.homePosition.z;
+      if (dx * dx + dz * dz < 2.5 * 2.5) {
+        robot.batteryLevel = Math.min(ROBOT_BATTERY_KWH, robot.batteryLevel + 0.15);
+      }
+    }
+    const t = totalDemandKwh();
+    if (
+      robot.state === 'idle' &&
+      !robot.atHome &&
+      (robot.batteryLevel < LOW_BATTERY_KWH || t === 0 || robot.batteryLevel < t)
+    ) {
+      robot.returnHomeAndCharge(() => {});
+    }
+  });
+  
   controls.update();
   renderer.render(scene, camera);
 }
