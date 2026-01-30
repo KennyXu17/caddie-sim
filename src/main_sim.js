@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { gsap } from "gsap";
 import { OrderManager, PARKING_SPOTS } from './orderSystem.js';
-import { pathfinder, collisionAvoidance, isDrivable } from './pathfinding.js';
+import { pathfinder, collisionAvoidance, isDrivable, PARKING_LOT_BOUNDS } from './pathfinding.js';
 import { findPathTopo, isCrossingSegment, getSpotRow } from './topology.js';
 
 // === UI Setup ===
@@ -74,7 +74,7 @@ console.log = function (...args) {
 
 // === Scene Setup ===
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf0f0f0);
+scene.background = new THREE.Color(0xc8d0e0); // 淡蓝灰，略暗
 
 // === Camera ===
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
@@ -91,22 +91,22 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 // PBR 渲染设置 - 关键配置
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping; // 使用电影级色调映射
-renderer.toneMappingExposure = 1.2; // 提高曝光度使 PBR 模型更亮
+renderer.toneMappingExposure = 0.8; // 降低整体亮度
 
 document.body.appendChild(renderer.domElement);
 renderer.domElement.style.width = window.innerWidth + 'px';
 renderer.domElement.style.height = window.innerHeight + 'px';
 
 // === Lights ===
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
 scene.add(ambientLight);
 
 // 半球光 - 为 PBR 材质提供更自然的环境光照
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 2.0);
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
 hemiLight.position.set(0, 50, 0);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
 dirLight.position.set(20, 50, 20);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.width = 2048;
@@ -129,21 +129,33 @@ const envScene = new THREE.Scene();
 envScene.background = new THREE.Color(0xffffff);
 
 // 添加多个方向的光源到环境场景，模拟真实环境光
-const envLight1 = new THREE.DirectionalLight(0xffffff, 1.0);
+const envLight1 = new THREE.DirectionalLight(0xffffff, 0.5);
 envLight1.position.set(1, 1, 1);
 envScene.add(envLight1);
 
-const envLight2 = new THREE.DirectionalLight(0xaaccff, 0.5);
+const envLight2 = new THREE.DirectionalLight(0xaaccff, 0.35);
 envLight2.position.set(-1, 1, -1);
 envScene.add(envLight2);
 
-const envLight3 = new THREE.AmbientLight(0xffffff, 1.0);
+const envLight3 = new THREE.AmbientLight(0xffffff, 0.7);
 envScene.add(envLight3);
 
 // 生成环境贴图并应用到场景
 const envMap = pmremGenerator.fromScene(envScene).texture;
-scene.environment = envMap; // 关键：为所有 PBR 材质提供环境反射
+scene.environment = envMap;
 pmremGenerator.dispose();
+
+/** 降低模型反光：遍历 mesh 及其子节点，对 PBR 材质设置 envMapIntensity、适度提高 roughness */
+function reduceReflections(obj, envMapIntensity = 0.3) {
+  obj.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach((m) => {
+      if (m.envMapIntensity !== undefined) m.envMapIntensity = envMapIntensity;
+      if (m.roughness !== undefined) m.roughness = Math.min(1, (m.roughness ?? 0.5) + 0.15);
+    });
+  });
+}
 
 // === Controls ===
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -248,6 +260,8 @@ let parkingLot = null;
 const ROBOT_BATTERY_KWH = 100;
 const VEHICLE_BATTERY_KWH = 80;
 const LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25; // 25%
+const ROBOT_Y_OFFSET = 0;      // 小 caddie 高度偏移（降低 1）
+const ROBOT_ROT_EXTRA = Math.PI / 2;  // 小 caddie 朝向修正：再旋转 90°
 
 // === Mouse Click Coordinate Detection === (已合并到上面的鼠标点击事件中，无需重复代码)
 
@@ -281,11 +295,10 @@ class ChargingRobot {
     const SPEED = 3.0; // units per second
     const duration = distance / SPEED;
 
-    // 逆时针旋转90度为正确朝向
     const angle = Math.atan2(
       targetPosition.x - currentPos.x,
       targetPosition.z - currentPos.z
-    ) + Math.PI / 2;
+    ) + Math.PI / 2 + ROBOT_ROT_EXTRA;
 
     const tl = gsap.timeline({
       onComplete: () => {
@@ -299,12 +312,12 @@ class ChargingRobot {
       ease: "power1.inOut"
     });
 
-    // Move to target with constant speed
     tl.to(this.model.position, {
       x: targetPosition.x,
+      y: targetPosition.y != null ? targetPosition.y : ROBOT_Y_OFFSET,
       z: targetPosition.z,
       duration: duration,
-      ease: "none" // 恒定速度
+      ease: "none"
     });
 
     return tl;
@@ -338,7 +351,7 @@ class ChargingRobot {
       }
     });
 
-    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
+    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2 + ROBOT_ROT_EXTRA;
 
     const addPathSegment = (from, to) => {
       const occ = collisionAvoidance.getOccupiedPositions(`robot_${this.id}`);
@@ -353,14 +366,14 @@ class ChargingRobot {
           const dur = dist / SPEED;
           const angle = rot(curr.x - prev.x, curr.z - prev.z);
           mainTl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
-          mainTl.to(this.model.position, { x: curr.x, z: curr.z, y: curr.y != null ? curr.y : 0, duration: dur, ease: "none" });
+          mainTl.to(this.model.position, { x: curr.x, z: curr.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
         }
       } else {
         const dist = Math.sqrt(Math.pow(to.x - from.x, 2) + Math.pow(to.z - from.z, 2));
         const dur = dist / SPEED;
         const angle = rot(to.x - from.x, to.z - from.z);
         mainTl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
-        mainTl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: dur, ease: "none" });
+        mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
       }
     };
 
@@ -371,7 +384,7 @@ class ChargingRobot {
       const dz = to.z - from.z;
       mainTl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.4, ease: "power1.inOut" });
       const d = Math.sqrt(dx * dx + dz * dz);
-      mainTl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: d / SPEED, ease: "none" });
+      mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: d / SPEED, ease: "none" });
     };
 
     const toPos = (w) => ({ x: w.x, z: w.z, y: w.y != null ? w.y : 0 });
@@ -441,7 +454,7 @@ class ChargingRobot {
           if (onComplete) onComplete();
         }
       });
-      const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
+      const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2 + ROBOT_ROT_EXTRA;
       const dx = stationPos.x - chargingPos.x;
       const dz = stationPos.z - chargingPos.z;
       chargeTl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.8, ease: "power1.inOut" });
@@ -488,7 +501,7 @@ class ChargingRobot {
     const homeSide = homeSpot?.side ?? 'right';
     const SPEED = 3.0;
     const CROSSING_YIELD = 1.0;
-    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2;
+    const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2 + ROBOT_ROT_EXTRA;
     const currentPos = { x: this.model.position.x, z: this.model.position.z, y: this.model.position.y };
     const startSpot = this.lastSpotIndex;
     const endSpot = homeSpot?.index ?? 33;
@@ -507,14 +520,14 @@ class ChargingRobot {
           const dur = dist / SPEED;
           const angle = rot(curr.x - prev.x, curr.z - prev.z);
           tl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
-          tl.to(this.model.position, { x: curr.x, z: curr.z, y: curr.y != null ? curr.y : 0, duration: dur, ease: "none" });
+          tl.to(this.model.position, { x: curr.x, z: curr.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
         }
       } else {
         const dist = Math.sqrt(Math.pow(to.x - from.x, 2) + Math.pow(to.z - from.z, 2));
         const dur = dist / SPEED;
         const angle = rot(to.x - from.x, to.z - from.z);
         tl.to(this.model.rotation, { y: angle, duration: rotDur, ease: "power1.inOut" });
-        tl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: dur, ease: "none" });
+        tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
       }
     };
     const addCrossing = (from, to) => {
@@ -524,7 +537,7 @@ class ChargingRobot {
       const dz = to.z - from.z;
       tl.to(this.model.rotation, { y: rot(dx, dz), duration: 0.4, ease: "power1.inOut" });
       const d = Math.sqrt(dx * dx + dz * dz);
-      tl.to(this.model.position, { x: to.x, z: to.z, y: to.y != null ? to.y : 0, duration: d / SPEED, ease: "none" });
+      tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: d / SPEED, ease: "none" });
     };
 
     const tl = gsap.timeline({
@@ -557,23 +570,112 @@ class ChargingRobot {
   }
 }
 
-// === Load Parking Lot ===
+// === Load Parking Lot === (暂时不显示)
+// loader.load(
+//   '/Parking_fixed.glb',
+//   (gltf) => {
+//     parkingLot = gltf.scene;
+//     parkingLot.scale.set(1, 1, 1);
+//     parkingLot.traverse((obj) => {
+//       if (obj.isMesh) {
+//         obj.receiveShadow = true;
+//         obj.castShadow = true;
+//       }
+//     });
+//     scene.add(parkingLot);
+//     console.log('✅ Parking lot loaded');
+//   },
+//   undefined,
+//   (err) => console.error('❌ Parking lot load error:', err)
+// );
+
+// === Gray background + Parking lines overlay（同位置，先灰底再白线）===
+const texLoader = new THREE.TextureLoader();
+const _pw = PARKING_LOT_BOUNDS.bottomRight.x - PARKING_LOT_BOUNDS.topLeft.x;
+const _pd = PARKING_LOT_BOUNDS.bottomRight.z - PARKING_LOT_BOUNDS.topLeft.z;
+const _pcx = (PARKING_LOT_BOUNDS.topLeft.x + PARKING_LOT_BOUNDS.bottomRight.x) / 2;
+const _pcz = (PARKING_LOT_BOUNDS.topLeft.z + PARKING_LOT_BOUNDS.bottomRight.z) / 2;
+const _pgeo = () => new THREE.PlaneGeometry(_pw, _pd);
+const _ppos = () => ({ x: _pcx, y: 0, z: _pcz - 1.7 });
+const _pscale = 1.118;
+const _prot = -Math.PI / 2;
+
+// Gray background (temporarily commented out)
+// texLoader.load(
+//   '/textures/gray_background_matched.png',
+//   (mapGray) => {
+//     mapGray.colorSpace = THREE.SRGBColorSpace;
+//     const geo = _pgeo();
+//     const mat = new THREE.MeshBasicMaterial({
+//       map: mapGray,
+//       side: THREE.DoubleSide
+//     });
+//     const plane = new THREE.Mesh(geo, mat);
+//     plane.rotation.x = _prot;
+//     plane.position.set(_ppos().x, _ppos().y - 0.005, _ppos().z+1.1);
+//     plane.scale.set(_pscale+0.08, _pscale-0.08, _pscale);
+//     scene.add(plane);
+//     console.log('✅ Gray background overlay applied');
+//   },
+//   undefined,
+//   (err) => console.error('❌ gray_background_matched.png load error:', err)
+// );
+
+// Parking lines overlay (decoupled, loads independently)
+texLoader.load(
+  '/textures/parking_lines_white.png',
+  (map) => {
+    map.colorSpace = THREE.SRGBColorSpace;
+    const geo2 = _pgeo();
+    const mat2 = new THREE.MeshStandardMaterial({
+      map,
+      color: 0xffffff,              // 纯白
+      roughness: 0.3,
+      metalness: 0.0,
+    
+      emissive: new THREE.Color(0xffffff),
+      emissiveIntensity: 0.35,      // 更亮、更白
+    
+      transparent: true,
+      alphaTest: 0.1,
+    
+      polygonOffset: true,          // ⭐防止Z-fighting
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    
+      side: THREE.DoubleSide
+    });
+    
+    const plane2 = new THREE.Mesh(geo2, mat2);
+    plane2.rotation.x = _prot;
+    plane2.position.set(_ppos().x, _ppos().y, _ppos().z);
+    plane2.scale.set(_pscale, _pscale, _pscale);
+    scene.add(plane2);
+    console.log('✅ Parking lines overlay applied');
+  },
+  undefined,
+  (err) => console.error('❌ parking_lines_white.png load error:', err)
+);
+
+// === Load Background Building (Treasure Island) ===
 loader.load(
-  '/Parking_fixed.glb',
+  '/Treasure_Island_3.glb',
   (gltf) => {
-    parkingLot = gltf.scene;
-    parkingLot.scale.set(1, 1, 1);
-    parkingLot.traverse((obj) => {
+    const bg = gltf.scene;
+    bg.scale.set(50, 50, 50);
+    bg.position.set(-1, 8.05, -42);
+    bg.rotation.x = -Math.PI / 60;
+    bg.traverse((obj) => {
       if (obj.isMesh) {
         obj.receiveShadow = true;
         obj.castShadow = true;
       }
     });
-    scene.add(parkingLot);
-    console.log('✅ Parking lot loaded');
+    scene.add(bg);
+    console.log('✅ Treasure Island background loaded');
   },
   undefined,
-  (err) => console.error('❌ Parking lot load error:', err)
+  (err) => console.error('❌ Treasure Island load error:', err)
 );
 
 // 已移除充电站蓝色立方体；小 caddie 在 33、34 车位上自动充电
@@ -585,24 +687,23 @@ const spot34 = PARKING_SPOTS.find((s) => s.index === 34);
 const robotHomeSpots = [spot33, spot34];
 const robotPositions = robotHomeSpots.map((s) => ({
   x: s.x,
-  y: s.y != null ? s.y : 0,
+  y: (s.y != null ? s.y : 0) + ROBOT_Y_OFFSET,
   z: s.z
 }));
 
 robotPositions.forEach((pos, idx) => {
-  console.log(`📦 Attempting to load robot ${idx + 1} from /small_caddie.glb`);
+  console.log(`📦 Attempting to load robot ${idx + 1} from X-Caddie_textured.glb`);
   console.log(`   Position: (${pos.x}, ${pos.y}, ${pos.z})`);
   
   loader.load(
-      '/small_caddie.glb',
+      '/X-Caddie_textured.glb',
       (gltf) => {
         console.log(`✅ Robot ${idx + 1} model loaded successfully`);
         console.log(`   Scene has ${gltf.scene.children.length} children`);
       const robotModel = gltf.scene.clone();
       robotModel.scale.set(1, 1, 1);
       robotModel.position.set(pos.x, pos.y, pos.z);
-      // Set initial rotation to pi/2 (90 degrees, facing +X direction)
-      robotModel.rotation.y = Math.PI / 2; // 初始朝向，逆时针90度
+      robotModel.rotation.y = Math.PI / 2 + ROBOT_ROT_EXTRA;
       robotModel.traverse((obj) => {
         if (obj.isMesh) {
           obj.castShadow = true;
@@ -633,6 +734,7 @@ robotPositions.forEach((pos, idx) => {
               
               if (material.aoMap) {
                 material.aoMap.needsUpdate = true;
+                material.aoMapIntensity = 0.4;  // 降低 AO 暗部，整体更亮
               }
               
               // Only set fallback if material has no color/texture data
@@ -641,19 +743,23 @@ robotPositions.forEach((pos, idx) => {
                 console.log(`⚠️ Small caddie material has no color data, using light gray fallback`);
               }
               
-              // Ensure PBR materials respond to lighting
+              // Ensure PBR materials respond to lighting, brighten X-Caddie
               if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
-                // Keep original metalness and roughness values
+                if (material.envMapIntensity !== undefined) material.envMapIntensity = 0.3;
+                if (material.roughness !== undefined) material.roughness = Math.min(1, (material.roughness ?? 0.5) + 0.1);
+                if (material.color) material.color.multiplyScalar(1.05);  // 提亮基础色
+                material.emissive = material.emissive || new THREE.Color(0x888888);
+                material.emissiveIntensity = (material.emissiveIntensity ?? 0) + 0.0;
               }
-              
               material.needsUpdate = true;
             });
           } else {
             // Create default material only if completely missing
             obj.material = new THREE.MeshStandardMaterial({
               color: 0xcccccc,
-              metalness: 0.3,
-              roughness: 0.7
+              metalness: 0.5,
+              roughness: 0.1,
+              envMapIntensity: 0.3
             });
             console.log(`⚠️ Small caddie mesh has no material, created PBR default`);
           }
@@ -700,10 +806,11 @@ robotPositions.forEach((pos, idx) => {
           const robotModel = gltf.scene;
           robotModel.scale.set(0.75, 0.75, 0.75);
           robotModel.position.set(pos.x, pos.y, pos.z);
-          robotModel.rotation.y = Math.PI;
+          robotModel.rotation.y = Math.PI / 2 + ROBOT_ROT_EXTRA;
           robotModel.traverse((obj) => {
             if (obj.isMesh) obj.castShadow = true;
           });
+          reduceReflections(robotModel, 0.3);
           scene.add(robotModel);
 
           const robot = new ChargingRobot(robotModel, pos, idx + 1, robotHomeSpots[idx]);
@@ -864,6 +971,7 @@ function createVehicleSequence() {
             obj.receiveShadow = true;
           }
         });
+        reduceReflections(car, 0.3);
         scene.add(car);
 
         const targetParkingSpot = {
@@ -1107,17 +1215,17 @@ function assignRobotToVehicle(vehicle) {
 }
 
 // === Test if small_caddie.glb is accessible ===
-fetch('/small_caddie.glb', { method: 'HEAD' })
+fetch('/X-Caddie_textured.glb', { method: 'HEAD' })
   .then(response => {
     if (response.ok) {
-      console.log('✅ small_caddie.glb is accessible via HTTP');
+      console.log('✅ X-Caddie_textured.glb is accessible via HTTP');
       console.log(`   File size: ${response.headers.get('content-length')} bytes`);
     } else {
-      console.error(`❌ small_caddie.glb HTTP error: ${response.status} ${response.statusText}`);
+      console.error(`❌ X-Caddie_textured.glb HTTP error: ${response.status} ${response.statusText}`);
     }
   })
   .catch(err => {
-    console.error('❌ Cannot access small_caddie.glb:', err);
+    console.error('❌ Cannot access X-Caddie_textured.glb:', err);
     console.error('   Make sure the dev server is running and the file is in the public folder');
   });
 
