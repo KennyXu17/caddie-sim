@@ -1,230 +1,84 @@
 // === 路径规划和碰撞避免系统 ===
 // Pathfinding and Collision Avoidance System
+// 使用 parking_map.js 的网格几何与 A*
 
-// === 停车场区域定义 ===
+import {
+  isDrivable as mapIsDrivable,
+  parkingPathfinder,
+  formatOccupied,
+  LOT_BOUNDS,
+  CAR_COLLISION_RADIUS
+} from './parking_map.js';
+
+// 兼容旧 API
 const PARKING_LOT_BOUNDS = {
-  topLeft: { x: -25.08, y: 0.00, z: -31.13 },
-  bottomRight: { x: 22.94, y: 0.00, z: 6.78 },
-  contains(x, z) {
-    return x >= this.topLeft.x && x <= this.bottomRight.x &&
-           z >= this.topLeft.z && z <= this.bottomRight.z;
-  }
+  topLeft: { x: LOT_BOUNDS.minX, z: LOT_BOUNDS.minZ },
+  bottomRight: { x: LOT_BOUNDS.maxX, z: LOT_BOUNDS.maxZ },
+  contains(x, z) { return LOT_BOUNDS.contains(x, z); }
 };
 
-const NON_DRIVABLE_AREAS = [
-  {
-    id: 1,
-    name: '最上面一行停车位',
-    topLeft: { x: -25.25, y: 0.00, z: -31.13 },
-    bottomRight: { x: 23.16, y: 0.00, z: -25.40 },
-    contains(x, z) {
-      return x >= Math.min(this.topLeft.x, this.bottomRight.x) &&
-             x <= Math.max(this.topLeft.x, this.bottomRight.x) &&
-             z >= Math.min(this.topLeft.z, this.bottomRight.z) &&
-             z <= Math.max(this.topLeft.z, this.bottomRight.z);
-    }
-  },
-  {
-    id: 2,
-    name: '中间两行停车位加绿植区域',
-    topLeft: { x: -21.28, y: 0.00, z: -20.54 },
-    bottomRight: { x: 19.39, y: 0.00, z: -8.77 },
-    contains(x, z) {
-      return x >= Math.min(this.topLeft.x, this.bottomRight.x) &&
-             x <= Math.max(this.topLeft.x, this.bottomRight.x) &&
-             z >= Math.min(this.topLeft.z, this.bottomRight.z) &&
-             z <= Math.max(this.topLeft.z, this.bottomRight.z);
-    }
-  },
-  {
-    id: 3,
-    name: '最下面一行停车位加草坪',
-    topLeft: { x: -21.45, y: 0.00, z: -4.25 },
-    bottomRight: { x: 19.37, y: 0.00, z: 6.84 },
-    contains(x, z) {
-      return x >= Math.min(this.topLeft.x, this.bottomRight.x) &&
-             x <= Math.max(this.topLeft.x, this.bottomRight.x) &&
-             z >= Math.min(this.topLeft.z, this.bottomRight.z) &&
-             z <= Math.max(this.topLeft.z, this.bottomRight.z);
-    }
-  }
-];
+const NON_DRIVABLE_AREAS = []; // 已由 parking_map 的停车位定义替代
 
-// 检查点是否可行驶
-function isDrivable(x, z) {
-  if (!PARKING_LOT_BOUNDS.contains(x, z)) {
-    return false;
-  }
-  for (const area of NON_DRIVABLE_AREAS) {
-    if (area.contains(x, z)) {
-      return false;
-    }
-  }
-  return true;
+function isDrivable(x, z, excludeSpotIndex = null) {
+  return mapIsDrivable(x, z, excludeSpotIndex);
 }
 
-// === A* 路径规划算法 ===
+// === 统一 A* 路径规划（基于 parking_map 网格）===
 class AStarPathfinder {
-  constructor(gridSize = 0.5) {
-    this.gridSize = gridSize; // 网格大小
+  constructor() {
+    this._impl = parkingPathfinder;
   }
 
-  // 将坐标转换为网格坐标
-  worldToGrid(x, z) {
-    return {
-      i: Math.floor((x - PARKING_LOT_BOUNDS.topLeft.x) / this.gridSize),
-      j: Math.floor((z - PARKING_LOT_BOUNDS.topLeft.z) / this.gridSize)
-    };
-  }
-
-  // 将网格坐标转换为世界坐标
-  gridToWorld(i, j) {
-    return {
-      x: PARKING_LOT_BOUNDS.topLeft.x + i * this.gridSize + this.gridSize / 2,
-      z: PARKING_LOT_BOUNDS.topLeft.z + j * this.gridSize + this.gridSize / 2
-    };
-  }
-
-  // 检查网格点是否可行驶
-  isGridDrivable(i, j) {
-    const world = this.gridToWorld(i, j);
-    return isDrivable(world.x, world.z);
-  }
-
-  // 获取邻居节点
-  getNeighbors(i, j) {
-    const neighbors = [];
-    const directions = [
-      [0, 1], [1, 0], [0, -1], [-1, 0], // 上下左右
-      [1, 1], [1, -1], [-1, 1], [-1, -1] // 对角线
-    ];
-
-    for (const [di, dj] of directions) {
-      const ni = i + di;
-      const nj = j + dj;
-      if (this.isGridDrivable(ni, nj)) {
-        neighbors.push({ i: ni, j: nj, cost: Math.abs(di) + Math.abs(dj) === 2 ? 1.414 : 1 });
-      }
-    }
-    return neighbors;
-  }
-
-  // 计算启发式距离（欧几里得距离）
-  heuristic(i1, j1, i2, j2) {
-    const dx = i2 - i1;
-    const dz = j2 - j1;
-    return Math.sqrt(dx * dx + dz * dz);
-  }
-
-  // A* 路径查找
-  findPath(start, end, occupiedPositions = []) {
-    const startGrid = this.worldToGrid(start.x, start.z);
-    const endGrid = this.worldToGrid(end.x, end.z);
-
-    const openSet = [{ i: startGrid.i, j: startGrid.j, f: 0, g: 0, h: 0 }];
-    const closedSet = new Set();
-    const cameFrom = new Map();
-    const gScore = new Map();
-    const fScore = new Map();
-
-    const startKey = `${startGrid.i},${startGrid.j}`;
-    gScore.set(startKey, 0);
-    fScore.set(startKey, this.heuristic(startGrid.i, startGrid.j, endGrid.i, endGrid.j));
-
-    // 检查位置是否被占用
-    const isOccupied = (i, j) => {
-      const world = this.gridToWorld(i, j);
-      return occupiedPositions.some(pos => {
-        const dx = world.x - pos.x;
-        const dz = world.z - pos.z;
-        return Math.sqrt(dx * dx + dz * dz) < 1.5; // 1.5单位内的碰撞检测
-      });
-    };
-
-    while (openSet.length > 0) {
-      // 找到f值最小的节点
-      openSet.sort((a, b) => a.f - b.f);
-      const current = openSet.shift();
-      const currentKey = `${current.i},${current.j}`;
-
-      if (current.i === endGrid.i && current.j === endGrid.j) {
-        // 重建路径
-        const path = [];
-        let node = current;
-        while (node) {
-          const world = this.gridToWorld(node.i, node.j);
-          path.unshift({ x: world.x, z: world.z, y: 0 });
-          const fromKey = `${node.i},${node.j}`;
-          const from = cameFrom.get(fromKey);
-          node = from ? { i: from.i, j: from.j } : null;
-        }
-        return path;
-      }
-
-      closedSet.add(currentKey);
-
-      for (const neighbor of this.getNeighbors(current.i, current.j)) {
-        const neighborKey = `${neighbor.i},${neighbor.j}`;
-        
-        if (closedSet.has(neighborKey) || isOccupied(neighbor.i, neighbor.j)) {
-          continue;
-        }
-
-        const tentativeG = (gScore.get(currentKey) || Infinity) + neighbor.cost;
-
-        if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
-          cameFrom.set(neighborKey, current);
-          gScore.set(neighborKey, tentativeG);
-          const h = this.heuristic(neighbor.i, neighbor.j, endGrid.i, endGrid.j);
-          fScore.set(neighborKey, tentativeG + h);
-
-          if (!openSet.find(n => n.i === neighbor.i && n.j === neighbor.j)) {
-            openSet.push({ i: neighbor.i, j: neighbor.j, f: tentativeG + h, g: tentativeG, h });
-          }
-        }
-      }
-    }
-
-    // 如果找不到路径，返回直线路径（简化处理）
-    return [{ x: start.x, z: start.z, y: 0 }, { x: end.x, z: end.z, y: 0 }];
+  /**
+   * 寻路
+   * @param {{ x, z }} start - 起点
+   * @param {{ x, z }} end - 终点
+   * @param {Array<{x,z,radius?}>} occupiedPositions - 动态障碍
+   * @param {Object} options - { agentType: 'car'|'caddie', excludeSpotIndex: number }
+   */
+  findPath(start, end, occupiedPositions = [], options = {}) {
+    const agentType = options.agentType ?? 'caddie';
+    const excludeSpotIndex = options.excludeSpotIndex ?? null;
+    const occ = formatOccupied(occupiedPositions, agentType);
+    return this._impl.findPath(start, end, agentType, excludeSpotIndex, occ);
   }
 }
 
 // === 碰撞避免系统 ===
 class CollisionAvoidance {
   constructor() {
-    this.occupiedPositions = []; // 当前被占用的位置
-    this.reservedPaths = []; // 已预留的路径
+    this.occupiedPositions = [];
+    this.reservedPaths = [];
   }
 
-  // 添加占用位置
-  addOccupiedPosition(position, id) {
-    this.occupiedPositions.push({ ...position, id, timestamp: Date.now() });
+  addOccupiedPosition(position, id, agentType = 'caddie') {
+    const radius = agentType === 'car' ? CAR_COLLISION_RADIUS : (Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2);
+    this.removeOccupiedPosition(id);
+    this.occupiedPositions.push({ ...position, id, agentType, radius, timestamp: Date.now() });
   }
 
-  // 移除占用位置
   removeOccupiedPosition(id) {
     this.occupiedPositions = this.occupiedPositions.filter(pos => pos.id !== id);
   }
 
-  // 预留路径
   reservePath(path, id, duration) {
     this.reservedPaths.push({ path, id, timestamp: Date.now(), duration });
-    // 自动清理过期的路径预留
     setTimeout(() => {
       this.reservedPaths = this.reservedPaths.filter(p => p.id !== id);
     }, duration);
   }
 
-  // 检查路径是否与其他对象冲突
-  checkPathConflict(path, excludeId = null) {
+  checkPathConflict(path, excludeId = null, pathAgentType = 'car') {
+    const carRadius = CAR_COLLISION_RADIUS;
+    const caddieRadius = Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2;
+    const pathRadius = pathAgentType === 'car' ? carRadius : caddieRadius;
     for (const reserved of this.reservedPaths) {
       if (reserved.id === excludeId) continue;
+      const reservedRadius = reserved.id.startsWith('vehicle_') ? carRadius : caddieRadius;
+      const minSep = pathRadius + reservedRadius;
       for (const pathPoint of path) {
         for (const reservedPoint of reserved.path) {
-          const dx = pathPoint.x - reservedPoint.x;
-          const dz = pathPoint.z - reservedPoint.z;
-          if (Math.sqrt(dx * dx + dz * dz) < 2.0) { // 2单位内的冲突检测
+          if (Math.hypot(pathPoint.x - reservedPoint.x, pathPoint.z - reservedPoint.z) < minSep) {
             return { conflict: true, with: reserved.id };
           }
         }
@@ -233,17 +87,15 @@ class CollisionAvoidance {
     return { conflict: false };
   }
 
-  // 获取所有占用位置（用于路径规划）
-  getOccupiedPositions(excludeId = null) {
+  getOccupiedPositions(excludeId = null, alsoExcludeIds = []) {
+    const excludeSet = new Set([excludeId, ...alsoExcludeIds].filter(Boolean));
     return this.occupiedPositions
-      .filter(pos => pos.id !== excludeId)
-      .map(pos => ({ x: pos.x, z: pos.z }));
+      .filter(pos => !excludeSet.has(pos.id))
+      .map(pos => ({ x: pos.x, z: pos.z, radius: pos.radius }));
   }
 }
 
-// 创建全局实例
-const pathfinder = new AStarPathfinder(0.5);
+const pathfinder = new AStarPathfinder();
 const collisionAvoidance = new CollisionAvoidance();
 
-// 导出
 export { pathfinder, collisionAvoidance, isDrivable, PARKING_LOT_BOUNDS, NON_DRIVABLE_AREAS };
