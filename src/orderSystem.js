@@ -15,20 +15,36 @@ const PARKING_SPOTS = MAP_SPOTS.map((spot) => ({
   opening: spot.opening
 }));
 
+/** 机器人充电站车位：车辆禁止停入，仅供机器人休息/自充电 */
+const ROBOT_CHARGING_STATION_SPOTS = [1, 14];
+
+/** 暂时禁止停车的车位（如施工/维护） */
+const DISABLED_PARKING_SPOTS = [2, 13];
+
 // === 订单管理器 ===
 class OrderManager {
   constructor(robotInitialPositions = []) {
     this.orders = [];
     this.orderCounter = 0;
     this.occupiedSpots = new Set();
-    
-    // 机器人初始位置的停车位始终为占用状态
+
+    // 机器人充电站车位（1、14）永久占用，车辆禁止停入
+    ROBOT_CHARGING_STATION_SPOTS.forEach(idx => {
+      this.occupiedSpots.add(idx);
+    });
+    // 暂时禁止停车的车位
+    DISABLED_PARKING_SPOTS.forEach(idx => {
+      this.occupiedSpots.add(idx);
+    });
+    console.log(`🚫 Robot charging stations: spots ${ROBOT_CHARGING_STATION_SPOTS.join(', ')} reserved (no vehicle parking)`);
+    console.log(`🚫 Disabled parking spots (temporary): ${DISABLED_PARKING_SPOTS.join(', ')}`);
+
+    // 机器人初始位置的停车位（若与充电站不同）也标记为占用
     robotInitialPositions.forEach(robotPos => {
-      // 找到最近的停车位
       const nearestSpot = this.findNearestParkingSpot(robotPos);
-      if (nearestSpot) {
+      if (nearestSpot && !ROBOT_CHARGING_STATION_SPOTS.includes(nearestSpot.index)) {
         this.occupiedSpots.add(nearestSpot.index);
-        console.log(`🚫 Parking spot ${nearestSpot.index} is permanently occupied by robot at (${robotPos.x}, ${robotPos.z})`);
+        console.log(`🚫 Parking spot ${nearestSpot.index} is occupied by robot at (${robotPos.x}, ${robotPos.z})`);
       }
     });
   }
@@ -52,9 +68,11 @@ class OrderManager {
     return nearest;
   }
 
-  // 获取可用的停车位
+  // 获取可用的停车位（排除机器人充电站 1、14 及暂时禁止的车位）
   getAvailableSpots() {
-    return PARKING_SPOTS.filter(spot => !this.occupiedSpots.has(spot.index));
+    return PARKING_SPOTS.filter(
+      spot => !this.occupiedSpots.has(spot.index) && !ROBOT_CHARGING_STATION_SPOTS.includes(spot.index) && !DISABLED_PARKING_SPOTS.includes(spot.index)
+    );
   }
 
   // 创建新订单
@@ -108,6 +126,7 @@ class OrderManager {
     const order = this.orders.find(o => o.id === orderId);
     if (order) {
       order.status = 'completed';
+      order.completedAt = order.completedAt ?? Date.now();
       this.occupiedSpots.delete(order.parkingSpot.index);
       console.log(`✅ Order ${orderId} completed, parking spot ${order.parkingSpot.index} is now available`);
     }

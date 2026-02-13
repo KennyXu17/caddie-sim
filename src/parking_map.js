@@ -75,12 +75,9 @@ function buildParkingSpots() {
       const cx = minX + w / 2;
       const cz = (row.minZ + row.maxZ) / 2;
 
-      // 门口中心：1-14,25-34 开口+z，门口在 z=maxZ 边；15-24,35-44 开口-z，门口在 z=minZ 边
-      // 需求：25-34 的车位口线在 z 方向 +0.5（向 +z 外移 0.5）
-      let chargeZ = row.opening === '+z' ? row.maxZ : row.minZ;
-      if (index >= 25 && index <= 34 && row.opening === '+z') {
-        chargeZ += 0.5;
-      }
+      // C_i（充电点）：由 S_i（车位中心）沿开口方向距离 2.7
+      const CI_DIST = 2.7;
+      const chargeZ = row.opening === '+z' ? cz + CI_DIST : cz - CI_DIST;
 
       spots.push({
         index,
