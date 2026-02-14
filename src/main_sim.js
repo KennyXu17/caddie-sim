@@ -12,7 +12,7 @@ import { gsap } from "gsap";
 import { OrderManager, PARKING_SPOTS } from './orderSystem.js';
 import { collisionAvoidance } from './pathfinding.js';
 import { LOT_BOUNDS } from './parking_map.js';
-import { planVehicleEnterTrajectory, planVehicleEnterTrajectoryFromKeypoints, planVehicleExitTrajectory, planVehicleEnterSmartPath, planVehicleExitSmartPath, buildSmartPathFromKeypoints, smartPathToDensePoints, getVehicleTrajectoryKeypoints, getSlotTurnId, getSlotTurnArcForEgress, sampleArcReverse, KP, KP_NODES, KP_EDGES } from './keypoint_graph.js';
+import { planVehicleEnterTrajectory, planVehicleEnterTrajectoryFromKeypoints, planVehicleExitTrajectory, planVehicleEnterSmartPath, planVehicleExitSmartPath, buildSmartPath, buildSmartPathFromKeypoints, smartPathToDensePoints, getVehicleTrajectoryKeypoints, getSlotTurnId, getSlotTurnArcForEgress, sampleArcReverse, getTurnRadiusForKeypoint, KP, KP_NODES, KP_EDGES } from './keypoint_graph.js';
 import { getVehicleLaneGraphData } from './vehicle_lane_graph.js';
 import { findPathTopo, findPathTopoST, isCrossingSegment, getSpotRow, getGraphData, getChargePointPosition, getCharge0Position, getMovePointPosition, getLeaveTargetFromCharge0 } from './topology.js';
 import {
@@ -780,7 +780,7 @@ scene.background = new THREE.Color(0xc8d0e0); // 淡蓝灰，略暗
 
 // Vehicle trajectory visualization: record positions and draw trails
 const vehicleTrajectories = new Map(); // vehicleId -> { points: [], line: THREE.Line, lastRecorded }
-const TRAJECTORY_Y = 0.001; // Just above ground
+const TRAJECTORY_Y = 0.02; // Slightly above ground to avoid z-fighting flicker
 const TRAJECTORY_MIN_STEP = 0.12; // Record point when moved this far
 const TRAJECTORY_MAX_POINTS = 800;
 const trajectoryGroup = new THREE.Group();
@@ -2229,7 +2229,7 @@ robotPositions.forEach((pos, idx) => {
   console.log(`   Position: (${pos.x}, ${pos.y}, ${pos.z})`);
   
   loader.load(
-      '/Caddie_with_Arm_animation.glb',
+      '/Caddie_with_Arm_animation_nopipe.glb',
       (gltf) => {
         console.log(`✅ Robot ${idx + 1} model loaded successfully`);
         console.log(`   Scene has ${gltf.scene.children.length} children`);
@@ -2684,9 +2684,16 @@ function createVehicleSequence() {
     // 更新occupiedSpots以保持兼容性
     occupiedSpots.add(parkingSpotIndex);
     console.log(`🅿️ Vehicle ${vehicleCounter} assigned to spot ${selectedSpot.index} (${selectedSpot.side} side) via Order ${order.id}`);
-    
+
+    const VEHICLE_MODEL_PATHS = [
+      '/Tesla_with_chargeport_animation_BLUE.glb',
+      '/Tesla_with_chargeport_animation_GREEN.glb',
+      '/Tesla_with_chargeport_animation_RED.glb'
+    ];
+    const vehicleModelPath = VEHICLE_MODEL_PATHS[Math.floor(Math.random() * VEHICLE_MODEL_PATHS.length)];
+
     loader.load(
-      '/Tesla_with_chargeport_Animation.glb',
+      vehicleModelPath,
       (gltf) => {
         // Use vehicle lane graph node coordinates as single source of truth
         const graphEntrance = getVehicleNodePos('entrance') || { x: KP.ENTRANCE.x, z: KP.ENTRANCE.z };
@@ -2697,7 +2704,7 @@ function createVehicleSequence() {
         car.add(carMesh);
         carMesh.position.set(3, -1., 0.5);
         car.scale.set(0.9, 0.9, 0.9);
-        car.position.set(graphEntrance.x, 0.9, graphEntrance.z);
+        car.position.set(graphEntrance.x, 0.825, graphEntrance.z);
         // 往 -y(-Z) 方向看，再逆时针旋转 90°
         car.rotation.y = Math.PI + Math.PI / 2;
         carMesh.traverse((obj) => {
@@ -2748,31 +2755,39 @@ function createVehicleSequence() {
 
         const startEnterAnimation = () => {
         const VEHICLE_SPEED = 4.0;
-        const VEHICLE_Y = 0.9;
+        const VEHICLE_Y = 0.825;
         const agentId = `vehicle_${vehicleCounter}`;
         const RESERVE_WINDOW_SEC = 1.0;
         const cp = selectedSpot.chargePoint ? { x: selectedSpot.chargePoint.x, z: selectedSpot.chargePoint.z } : null;
-        // Trajectory: V:entrance -> V:turn_xx_entry -> V:slot_xx -> Cxx -> Sxx (R:MP/R:CF only for conflict)
-        const graphTurn = getVehicleNodePos(selectedSpot.index >= 25 ? 'turn_25_44_entry' : 'turn_1_24_entry');
-        const slotNodeId = getSlotTurnId(selectedSpot.index).replace('V:', '');
-        const graphSlotTurn = getVehicleNodePos(slotNodeId);
-        const graphC = getChargePointPosition(selectedSpot.index); // Cxx
-        const graphSpot = getVehicleNodePos(`S${selectedSpot.index}`) || { x: targetParkingSpot.x, z: targetParkingSpot.z };
-        const fallbackKps = getVehicleTrajectoryKeypoints(selectedSpot.index, targetParkingSpot, 'enter');
-        const turnId = selectedSpot.index >= 25 ? 'V:turn_25_44_entry' : 'V:turn_1_24_entry';
-        const slotId = getSlotTurnId(selectedSpot.index);
-        const keypoints = [
-          { ...(graphEntrance || (fallbackKps[0] && { x: fallbackKps[0].x, z: fallbackKps[0].z })), id: 'V:entrance' },
-          { ...(graphTurn || (fallbackKps[1] && { x: fallbackKps[1].x, z: fallbackKps[1].z })), id: turnId },
-          { ...(graphSlotTurn || (fallbackKps[2] && { x: fallbackKps[2].x, z: fallbackKps[2].z })), id: slotId },
-          ...(graphC ? [{ ...graphC, id: `C${selectedSpot.index}` }] : []),
-          { ...(graphSpot || (fallbackKps[fallbackKps.length - 1] && { x: fallbackKps[fallbackKps.length - 1].x, z: fallbackKps[fallbackKps.length - 1].z })), id: `S${selectedSpot.index}` }
-        ].filter(Boolean);
-        const spotCenter = { x: graphSpot.x, z: graphSpot.z };
-        const smartPath = keypoints.every(p => p && p.x != null && p.z != null)
-          ? buildSmartPathFromKeypoints(keypoints)
-          : planVehicleEnterSmartPath(selectedSpot.index, targetParkingSpot);
-        const denseFull = smartPath.length > 0 ? smartPathToDensePoints(smartPath, 0.5) : densifyWaypoints(planVehicleEnterTrajectory(selectedSpot.index, targetParkingSpot, 1.2));
+        let smartPath, denseFull, spotCenter;
+        const precomputedEnter = PRECOMPUTED_TRAJECTORIES.get(selectedSpot.index);
+        if (precomputedEnter) {
+          smartPath = precomputedEnter.enterSmartPath;
+          denseFull = precomputedEnter.enterDensePoints;
+          spotCenter = { x: targetParkingSpot.x, z: targetParkingSpot.z };
+        } else {
+          // Fallback for excluded slots (1, 2, 13, 14): build from graph/keypoints
+          const graphTurn = getVehicleNodePos(selectedSpot.index >= 25 ? 'turn_25_44_entry' : 'turn_1_24_entry');
+          const slotNodeId = getSlotTurnId(selectedSpot.index).replace('V:', '');
+          const graphSlotTurn = getVehicleNodePos(slotNodeId);
+          const graphC = getChargePointPosition(selectedSpot.index);
+          const graphSpot = getVehicleNodePos(`S${selectedSpot.index}`) || { x: targetParkingSpot.x, z: targetParkingSpot.z };
+          const fallbackKps = getVehicleTrajectoryKeypoints(selectedSpot.index, targetParkingSpot, 'enter');
+          const turnId = selectedSpot.index >= 25 ? 'V:turn_25_44_entry' : 'V:turn_1_24_entry';
+          const slotId = getSlotTurnId(selectedSpot.index);
+          const keypoints = [
+            { ...(graphEntrance || (fallbackKps[0] && { x: fallbackKps[0].x, z: fallbackKps[0].z })), id: 'V:entrance' },
+            { ...(graphTurn || (fallbackKps[1] && { x: fallbackKps[1].x, z: fallbackKps[1].z })), id: turnId },
+            { ...(graphSlotTurn || (fallbackKps[2] && { x: fallbackKps[2].x, z: fallbackKps[2].z })), id: slotId },
+            ...(graphC ? [{ ...graphC, id: `C${selectedSpot.index}` }] : []),
+            { ...(graphSpot || (fallbackKps[fallbackKps.length - 1] && { x: fallbackKps[fallbackKps.length - 1].x, z: fallbackKps[fallbackKps.length - 1].z })), id: `S${selectedSpot.index}` }
+          ].filter(Boolean);
+          spotCenter = { x: graphSpot.x, z: graphSpot.z };
+          smartPath = keypoints.every(p => p && p.x != null && p.z != null)
+            ? buildSmartPathFromKeypoints(keypoints)
+            : planVehicleEnterSmartPath(selectedSpot.index, targetParkingSpot);
+          denseFull = smartPath.length > 0 ? smartPathToDensePoints(smartPath, 0.5) : densifyWaypoints(planVehicleEnterTrajectory(selectedSpot.index, targetParkingSpot, 1.2));
+        }
 
         // Log trajectory nodes
         const pathNodes = getVehicleEnterPathNodes(selectedSpot.index, targetParkingSpot);
@@ -2838,30 +2853,42 @@ function createVehicleSequence() {
               return;
             }
             const VEHICLE_SPEED = 4.0;
-            const VEHICLE_Y = 0.9;
+            const VEHICLE_Y = 0.85;
             const agentId = `vehicle_${vehicleCounter}`;
             const RESERVE_WINDOW_SEC = 1.0;
             const cp = selectedSpot.chargePoint ? { x: selectedSpot.chargePoint.x, z: selectedSpot.chargePoint.z } : null;
-            
-            // Trajectory: lane -> turn -> exit (spot->lane is reverse motion; forward = smart path)
-            const exitSmartPath = planVehicleExitSmartPath(selectedSpot.index, targetParkingSpot);
             const spotCenter = { x: targetParkingSpot.x, z: targetParkingSpot.z };
-            const slotArc = getSlotTurnArcForEgress(selectedSpot.index, targetParkingSpot);
-            const lanePoint = slotArc
-              ? slotArc.arcStart
-              : (exitSmartPath.length
-                ? (exitSmartPath[0].type === 'STRAIGHT' ? exitSmartPath[0].start : { x: targetParkingSpot.x, z: selectedSpot.index >= 25 ? -6.5 : -23.0 })
-                : { x: targetParkingSpot.x, z: (selectedSpot.index >= 25 ? -6.5 : -22.5) });
-            // Coarser sampling for exit path to reduce stutter (fewer waypoints = smoother motion)
-            const reverseArcPoints = slotArc ? sampleArcReverse(slotArc, 0.85) : [];
-            const straightToArcEnd = cp ? [spotCenter, cp, slotArc?.arcEnd].filter(Boolean) : (slotArc ? [spotCenter, slotArc.arcEnd] : null);
-            const fullReversePath = slotArc && straightToArcEnd?.length
-              ? [...straightToArcEnd, ...reverseArcPoints.slice(1)]
-              : (cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint]);
-            const denseExitForward = smartPathToDensePoints(exitSmartPath, 0.7);
-            const denseExit = slotArc && straightToArcEnd?.length
-              ? [...densifyWaypoints(straightToArcEnd, 0.8), ...reverseArcPoints.slice(1), ...denseExitForward]
-              : [...densifyWaypoints(cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint], 0.8), ...denseExitForward];
+
+            let lanePoint, exitSmartPath, fullReversePath, pathForMotion, denseExitForward, denseExit;
+            const precomputedExit = PRECOMPUTED_TRAJECTORIES.get(selectedSpot.index);
+            if (precomputedExit) {
+              lanePoint = precomputedExit.lanePoint;
+              exitSmartPath = precomputedExit.exitSmartPath;
+              fullReversePath = precomputedExit.fullReversePath;
+              pathForMotion = precomputedExit.reversePathForMotion;
+              denseExitForward = precomputedExit.denseExitForward;
+              denseExit = precomputedExit.denseExit;
+            } else {
+              const slotArc = getSlotTurnArcForEgress(selectedSpot.index, targetParkingSpot);
+              const exitKps = getVehicleTrajectoryKeypoints(selectedSpot.index, targetParkingSpot, 'exit');
+              lanePoint = slotArc
+                ? slotArc.arcStart
+                : (exitKps.length >= 2 ? { x: exitKps[1].x, z: exitKps[1].z } : { x: targetParkingSpot.x, z: selectedSpot.index >= 25 ? -6.5 : -23.0 });
+              exitSmartPath = slotArc && exitKps.length >= 4
+                ? buildSmartPath([{ ...lanePoint, id: getSlotTurnId(selectedSpot.index) }, exitKps[2], exitKps[3]], getTurnRadiusForKeypoint)
+                : planVehicleExitSmartPath(selectedSpot.index, targetParkingSpot);
+              const reverseArcPoints = slotArc ? sampleArcReverse(slotArc, 0.85) : [];
+              const straightToArcEnd = cp ? [spotCenter, cp, slotArc?.arcEnd].filter(Boolean) : (slotArc ? [spotCenter, slotArc.arcEnd] : null);
+              fullReversePath = slotArc && straightToArcEnd?.length
+                ? [...straightToArcEnd, ...reverseArcPoints.slice(1)]
+                : (cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint]);
+              pathForMotion = simplifyPathByRadius(fullReversePath);
+              pathForMotion = pathForMotion.length >= 2 ? pathForMotion : fullReversePath;
+              denseExitForward = smartPathToDensePoints(exitSmartPath, 0.7);
+              denseExit = slotArc && straightToArcEnd?.length
+                ? [...densifyWaypoints(straightToArcEnd, 0.8), ...reverseArcPoints.slice(1), ...denseExitForward]
+                : [...densifyWaypoints(cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint], 0.8), ...denseExitForward];
+            }
 
             const t0 = getSimTime() + 0.8;
             if (isPathBlocked(denseExit, VEHICLE_SPEED, t0, agentId)) {
@@ -2899,8 +2926,7 @@ function createVehicleSequence() {
             }
             addGateWaitAtResourceAndPoint(leaveTl, lanePoint.x, lanePoint.z, laneResId(lanePoint.x, lanePoint.z), agentId, 0.8, 200, false);
             addReReserveAtPoint(leaveTl, agentId, fullReversePath, VEHICLE_SPEED, RESERVE_WINDOW_SEC);
-            const reversePathForMotion = simplifyPathByRadius(fullReversePath);
-            appendVehicleReverseMotion(leaveTl, car, reversePathForMotion.length >= 2 ? reversePathForMotion : fullReversePath, VEHICLE_SPEED, VEHICLE_Y, { minSegDur: 0.08 });
+            appendVehicleReverseMotion(leaveTl, car, pathForMotion, VEHICLE_SPEED, VEHICLE_Y, { minSegDur: 0.08 });
 
             if (exitSmartPath.length > 0) {
               if (pathUsesExitCorridor(denseExitForward)) {
@@ -2908,7 +2934,15 @@ function createVehicleSequence() {
                 addGateWaitForExitCorridor(leaveTl, agentId, corridorTransitTime, 200);
               }
               addReReserveAtPoint(leaveTl, agentId, denseExitForward, VEHICLE_SPEED, RESERVE_WINDOW_SEC);
-              appendSmartPathMotion(leaveTl, car, exitSmartPath, VEHICLE_SPEED, VEHICLE_Y);
+              const reverseEndHeading = precomputedExit?.reverseEndHeading ?? (pathForMotion.length >= 2
+                ? (() => {
+                    const prev = pathForMotion[pathForMotion.length - 2];
+                    const last = pathForMotion[pathForMotion.length - 1];
+                    const backDir = Math.atan2(prev.x - last.x, prev.z - last.z) + VEHICLE_MODEL_Y_OFFSET;
+                    return normalizeAngleShortestPath(0, backDir);
+                  })()
+                : undefined);
+              appendSmartPathMotion(leaveTl, car, exitSmartPath, VEHICLE_SPEED, VEHICLE_Y, reverseEndHeading !== undefined ? { initialHeading: reverseEndHeading } : {});
             }
             leaveTl.to(car.position, { y: -1, duration: 0.5, ease: "power1.inOut" });
           } else {
@@ -2962,10 +2996,22 @@ const minSegDur = 0.05;
  * @param {Array<{type:'STRAIGHT',start:{x,z},end:{x,z}}|{type:'ARC',center:{x,z},radius:number,startAngle:number,endAngle:number,clockwise:boolean}>} smartPath
  * @param {number} speed m/s
  * @param {number} vehicleY
+ * @param {{ initialHeading?: number }} opts optional; initialHeading = heading at path start (e.g. after reverse) to avoid wrong rotation when timeline is built before run
  */
-function appendSmartPathMotion(tl, car, smartPath, speed, vehicleY) {
+function appendSmartPathMotion(tl, car, smartPath, speed, vehicleY, opts = {}) {
   if (!tl || !car || !Array.isArray(smartPath) || smartPath.length === 0) return;
-  let currentHeading = car.rotation?.y ?? 0;
+  let currentHeading = typeof opts.initialHeading === 'number' ? opts.initialHeading : (car.rotation?.y ?? 0);
+
+  // When continuing from reverse (exit path), snap to first segment start to avoid 1-frame jump
+  if (typeof opts.initialHeading === 'number' && smartPath.length > 0) {
+    const seg0 = smartPath[0];
+    if (seg0 && seg0.start && typeof seg0.start.x === 'number' && typeof seg0.start.z === 'number') {
+      tl.set(car.position, { x: seg0.start.x, z: seg0.start.z, y: vehicleY });
+    }
+  }
+
+  const MAX_ROTATION_DURATION = 0.4; // cap turn animation so car doesn't "spin" for whole segment
+  const MIN_ANGLE_TO_ANIMATE = 0.07;  // ~4°: below this use set(), not to()
 
   for (const seg of smartPath) {
     if (seg.type === 'STRAIGHT') {
@@ -2976,7 +3022,13 @@ function appendSmartPathMotion(tl, car, smartPath, speed, vehicleY) {
       const duration = Math.max(minSegDur, len / Math.max(0.001, speed));
       const targetHeading = Math.atan2(dx, dz) + VEHICLE_MODEL_Y_OFFSET;
       const normalizedHeading = normalizeAngleShortestPath(currentHeading, targetHeading);
-      tl.to(car.rotation, { y: normalizedHeading, duration, ease: 'power1.inOut' });
+      const headingChange = Math.abs(angleDiff(currentHeading, normalizedHeading));
+      if (headingChange < MIN_ANGLE_TO_ANIMATE) {
+        tl.set(car.rotation, { y: normalizedHeading });
+      } else {
+        const rotDur = Math.min(duration, MAX_ROTATION_DURATION);
+        tl.to(car.rotation, { y: normalizedHeading, duration: rotDur, ease: 'power1.inOut' });
+      }
       tl.to(car.position, { x: seg.end.x, z: seg.end.z, y: vehicleY, duration, ease: 'none' }, '<');
       currentHeading = normalizedHeading;
     } else if (seg.type === 'ARC') {
@@ -3003,7 +3055,13 @@ function appendSmartPathMotion(tl, car, smartPath, speed, vehicleY) {
         const duration = totalDuration * (segLen / arcLen);
         const targetHeading = Math.atan2(b.x - a.x, b.z - a.z) + VEHICLE_MODEL_Y_OFFSET;
         const normalizedHeading = normalizeAngleShortestPath(currentHeading, targetHeading);
-        tl.to(car.rotation, { y: normalizedHeading, duration, ease: 'power1.inOut' });
+        const headingChange = Math.abs(angleDiff(currentHeading, normalizedHeading));
+        if (headingChange < MIN_ANGLE_TO_ANIMATE) {
+          tl.set(car.rotation, { y: normalizedHeading });
+        } else {
+          const rotDur = Math.min(duration, MAX_ROTATION_DURATION);
+          tl.to(car.rotation, { y: normalizedHeading, duration: rotDur, ease: 'power1.inOut' });
+        }
         tl.to(car.position, { x: b.x, z: b.z, y: vehicleY, duration, ease: 'none' }, '<');
         currentHeading = normalizedHeading;
       }
@@ -3031,6 +3089,74 @@ function simplifyPathByRadius(path) {
   if (path.length > 0 && out[out.length - 1] !== path[path.length - 1]) out.push(path[path.length - 1]);
   return out.length >= 2 ? out : path;
 }
+
+/** Slots 1, 2, 13, 14 excluded from precomputed trajectories (robot charging / disabled). */
+const EXCLUDED_SLOTS_FOR_TRAJECTORY = [1, 2, 13, 14];
+/** Precomputed enter/exit paths per slot index. Built once at load. */
+const PRECOMPUTED_TRAJECTORIES = new Map();
+
+function buildPrecomputedTrajectories() {
+  PRECOMPUTED_TRAJECTORIES.clear();
+  for (const spot of PARKING_SPOTS) {
+    if (EXCLUDED_SLOTS_FOR_TRAJECTORY.includes(spot.index)) continue;
+    const spotCenter = { x: spot.x, z: spot.z };
+    const cp = spot.chargePoint ? { x: spot.chargePoint.x, z: spot.chargePoint.z } : null;
+
+    const enterSmartPath = planVehicleEnterSmartPath(spot.index, spotCenter);
+    const enterDensePoints = enterSmartPath.length > 0
+      ? smartPathToDensePoints(enterSmartPath, 0.5)
+      : densifyWaypoints(planVehicleEnterTrajectory(spot.index, spotCenter, 1.2));
+
+    const slotArc = getSlotTurnArcForEgress(spot.index, spotCenter);
+    const exitKps = getVehicleTrajectoryKeypoints(spot.index, spotCenter, 'exit');
+    const lanePoint = slotArc
+      ? slotArc.arcStart
+      : (exitKps.length >= 2 ? { x: exitKps[1].x, z: exitKps[1].z } : { x: spotCenter.x, z: spot.index >= 25 ? -6.5 : -23.0 });
+
+    const exitSmartPath = slotArc && exitKps.length >= 4
+      ? buildSmartPath([{ ...lanePoint, id: getSlotTurnId(spot.index) }, exitKps[2], exitKps[3]], getTurnRadiusForKeypoint)
+      : planVehicleExitSmartPath(spot.index, spotCenter);
+
+    const reverseArcPoints = slotArc ? sampleArcReverse(slotArc, 0.85) : [];
+    const straightToArcEnd = cp ? [spotCenter, cp, slotArc?.arcEnd].filter(Boolean) : (slotArc ? [spotCenter, slotArc.arcEnd] : null);
+    const fullReversePath = slotArc && straightToArcEnd?.length
+      ? [...straightToArcEnd, ...reverseArcPoints.slice(1)]
+      : (cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint]);
+    const reversePathForMotion = simplifyPathByRadius(fullReversePath);
+    const pathForMotion = reversePathForMotion.length >= 2 ? reversePathForMotion : fullReversePath;
+
+    const denseExitForward = smartPathToDensePoints(exitSmartPath, 0.7);
+    const denseExit = slotArc && straightToArcEnd?.length
+      ? [...densifyWaypoints(straightToArcEnd, 0.8), ...reverseArcPoints.slice(1), ...denseExitForward]
+      : [...densifyWaypoints(cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint], 0.8), ...denseExitForward];
+
+    let reverseEndHeading;
+    if (pathForMotion.length >= 2) {
+      const prev = pathForMotion[pathForMotion.length - 2];
+      const last = pathForMotion[pathForMotion.length - 1];
+      const backDir = Math.atan2(prev.x - last.x, prev.z - last.z) + (Math.PI / 2);
+      reverseEndHeading = normalizeAngleShortestPath(0, backDir);
+    }
+
+    PRECOMPUTED_TRAJECTORIES.set(spot.index, {
+      enterSmartPath,
+      enterDensePoints,
+      slotArc,
+      reverseArcPoints,
+      straightToArcEnd,
+      fullReversePath,
+      reversePathForMotion: pathForMotion,
+      lanePoint,
+      exitSmartPath,
+      denseExitForward,
+      denseExit,
+      reverseEndHeading
+    });
+  }
+  console.log(`📐 Precomputed vehicle trajectories for ${PRECOMPUTED_TRAJECTORIES.size} slots (excluded: ${EXCLUDED_SLOTS_FOR_TRAJECTORY.join(', ')})`);
+}
+
+buildPrecomputedTrajectories();
 
 /**
  * Generate intermediate waypoints for Ackermann steering turn
@@ -3179,6 +3305,12 @@ function appendVehicleReverseMotion(tl, car, path, speed, vehicleY, opts = {}) {
   const useAckermann = opts.useAckermann !== false; // default to true
   if (!tl || !car || !Array.isArray(path) || path.length < 2) return;
 
+  // Snap to path start so reverse begins exactly on trajectory (avoids 1-frame jump)
+  const start = path[0];
+  if (start && typeof start.x === 'number' && typeof start.z === 'number') {
+    tl.set(car.position, { x: start.x, z: start.z, y: vehicleY });
+  }
+
   // Track current heading to ensure proper angle normalization
   let currentHeading = car.rotation?.y ?? 0;
 
@@ -3209,8 +3341,10 @@ function appendVehicleReverseMotion(tl, car, path, speed, vehicleY, opts = {}) {
       );
       currentHeading = normalizedBackDirection;
     } else {
-      // Small or no turn - just move backward
+      // Small or no turn - just move backward; still update heading so next segment doesn't flash
+      const normalizedBackDirection = normalizeAngleShortestPath(currentHeading, backDirection);
       tl.to(car.position, { x: b.x, z: b.z, y: vehicleY, duration: segDur, ease: 'none' });
+      currentHeading = normalizedBackDirection;
     }
   }
 }
@@ -3414,13 +3548,20 @@ function animate() {
         if (rec.points.length >= 6) {
           if (!rec.line) {
             const geo = new THREE.BufferGeometry();
+            const posArray = new Float32Array(TRAJECTORY_MAX_POINTS * 3);
+            geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            geo.setDrawRange(0, 0);
             const mat = new THREE.LineDashedMaterial({ color: 0xff0000, dashSize: 0.4, gapSize: 0.2 });
             rec.line = new THREE.Line(geo, mat);
             rec.line.frustumCulled = false;
             trajectoryGroup.add(rec.line);
           }
-          rec.line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(rec.points, 3));
-          rec.line.geometry.attributes.position.needsUpdate = true;
+          const posAttr = rec.line.geometry.attributes.position;
+          const n = Math.min(rec.points.length / 3, TRAJECTORY_MAX_POINTS);
+          const arr = posAttr.array;
+          for (let i = 0; i < n * 3; i++) arr[i] = rec.points[i];
+          rec.line.geometry.setDrawRange(0, n);
+          posAttr.needsUpdate = true;
           rec.line.computeLineDistances();
         }
       }
