@@ -1,5 +1,5 @@
 import { PARKING_SPOTS } from './orderSystem.js';
-import { KP, computeArcEndpoints, getTurnRadiusForKeypoint } from './keypoint_graph.js';
+import { KP, computeArcEndpoints, getTurnRadiusForKeypoint, getSlotGroup } from './keypoint_graph.js';
 
 /**
  * Vehicle lane graph (directed, one-way).
@@ -163,6 +163,37 @@ export function getVehicleLaneGraphData() {
     }
   }
 
-  return { nodes, edges };
+  return { nodes, edges, lowerSlotIds: lowerIds, upperSlotIds: upperIds };
+}
+
+/** Number of lane nodes to check "before" (toward entry) for reverse safety zone. */
+const REVERSE_ZONE_NODES_BEFORE = 2;
+
+/**
+ * Get vehicle lane node ids that form the Reverse Safety Zone for a spot.
+ * Zone = this spot's lane node + the REVERSE_ZONE_NODES_BEFORE nodes before it (toward entry, smaller x).
+ * e.g. S37 -> [slot_25_35, slot_26_36, slot_27_37]; S27 -> [slot_25_35, slot_26_36, slot_27_37].
+ */
+export function getReverseSafetyZoneVehicleNodeIds(slotIndex) {
+  const data = getVehicleLaneGraphData();
+  const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
+  const g = getSlotGroup(slotIndex);
+  if (!g) return [];
+  const orderedIds = g === '25_44' ? (data.upperSlotIds || []) : (data.lowerSlotIds || []);
+  if (!orderedIds.length) return [];
+  let myNodeId = [...nodeById.values()]
+    .filter((n) => n.type === 'slot_turn' && (n.meta?.slotIndices ?? []).includes(slotIndex))
+    .map((n) => n.id)[0];
+  // Fallback: 按 id 名匹配（如 slot_30_40 含 40），确保 S40 等总能得到 segment slot_28_38->slot_29_39->slot_30_40
+  if (!myNodeId && orderedIds.length) {
+    myNodeId = orderedIds.find(
+      (id) => id === `slot_${slotIndex}` || id.endsWith(`_${slotIndex}`) || id.includes(`_${slotIndex}_`)
+    ) || null;
+  }
+  if (!myNodeId) return [];
+  const idx = orderedIds.indexOf(myNodeId);
+  if (idx < 0) return [];
+  const start = Math.max(0, idx - REVERSE_ZONE_NODES_BEFORE);
+  return orderedIds.slice(start, idx + 1);
 }
 

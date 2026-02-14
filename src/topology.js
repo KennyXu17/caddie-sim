@@ -112,6 +112,13 @@ function buildGraph() {
     nodes.set(c.id, { id: c.id, x: c.x, z: c.z, y: 0, type: 'conflict', side: c.side, slotGroup: c.slotGroup });
   }
 
+  // R:turn_1_right、R:turn_2_right、R:CF_1_24（cf_1_14_right）往 x 正方向移 0.1
+  const RIGHT_OFFSET_X = 0.1;
+  for (const id of ['turn_1_right', 'turn_2_right', 'cf_1_14_right']) {
+    const n = nodes.get(id);
+    if (n) n.x += RIGHT_OFFSET_X;
+  }
+
   // Intermediate turn nodes between row 2 and row 3 (left/right columns)，不随 LEFT_X/RIGHT_X 平移
   nodes.set('turn_3_left_0', { id: 'turn_3_left_0', x: TURN0_LEFT_X, z: -9.5, y: 0, type: 'turn', row: 3, side: 'left' });
   nodes.set('turn_2_left_0', { id: 'turn_2_left_0', x: TURN0_LEFT_X, z: -20, y: 0, type: 'turn', row: 2, side: 'left' });
@@ -238,9 +245,9 @@ function buildGraph() {
       return [moveId(spotIndex - 1), moveId(spotIndex + 1)];
     }
     if (row === 3) {
-      // 行内方向 turn_3_right -> MP34 -> ... -> MP25 -> turn_3_left，故 left=高编号 right=低编号
-      if (spotIndex === 25) return [turnId(3, 'left'), moveId(26)];
-      if (spotIndex === 34) return [turnId(3, 'right'), moveId(33)];
+      // 行内方向 turn_3_right -> C34_0 -> MP33 -> ... -> MP26 -> C25_0 -> turn_3_left
+      if (spotIndex === 25) return [moveId(26), turnId(3, 'left')];   // MP26 -> C25_0 -> turn_3_left
+      if (spotIndex === 34) return [turnId(3, 'right'), moveId(33)];  // turn_3_right -> C34_0 -> MP33
       return [moveId(spotIndex + 1), moveId(spotIndex - 1)];
     }
     if (row === 4) {

@@ -19,7 +19,9 @@ import {
   getSlotGroup,
   isVehicleBehindOnLane,
   isVehicleNearEntryTurn,
-  isVehicleAheadOnExitLane
+  isVehicleAheadOnExitLane,
+  isVehicleInReverseSafetyZone,
+  isRobotInReverseSafetyZone
 } from './traffic_coordinator.js';
 import { 
   reservePath, reservePoint, reserveResource, releaseAgent, getSimTime, setSimTimeScale,
@@ -277,6 +279,56 @@ function waitForResourceAndPoint(x, z, resourceId, agentId, holdSec, pollMs, onF
   setTimeout(poll, pollMs);
 }
 
+/**
+ * 车辆进入车位前需判断的“机器人经过车位中心线”检测点：R:MP(slot)、邻位 C(next)_0 与 C(next)，以及 C(next)_0->R:MP、C(next)->R:MP 两段边。
+ * 邻位：slotIndex < 44 取 slotIndex+1，否则取 slotIndex-1。
+ */
+function getVehicleSlotApproachRobotPoints(slotIndex) {
+  const mp = getMovePointPosition(slotIndex);
+  if (!mp) return [];
+  const nextSlot = slotIndex < 44 ? slotIndex + 1 : slotIndex - 1;
+  const c0 = getCharge0Position(nextSlot);
+  const ci = getChargePointPosition(nextSlot);
+  const points = [{ x: mp.x, z: mp.z }];
+  if (c0) {
+    points.push({ x: c0.x, z: c0.z });
+    points.push({ x: (c0.x + mp.x) / 2, z: (c0.z + mp.z) / 2 });
+  }
+  if (ci) {
+    points.push({ x: ci.x, z: ci.z });
+    points.push({ x: (ci.x + mp.x) / 2, z: (ci.z + mp.z) / 2 });
+  }
+  return points;
+}
+
+/** 车辆进入车位前：等待车位中心线相关节点与边（R:MP、C_next_0->R:MP、C_next->R:MP）上无机器人后再执行 onFree。 */
+function waitUntilSlotApproachClear(slotIndex, pollMs, onFree) {
+  const points = getVehicleSlotApproachRobotPoints(slotIndex);
+  if (!points.length) {
+    onFree();
+    return;
+  }
+  const radius = 1.0;
+  const checkClear = () => points.every((p) => !isRobotAtPosition(p.x, p.z, null, radius));
+  if (checkClear()) {
+    onFree();
+    return;
+  }
+  const waitStart = Date.now();
+  const poll = () => {
+    if (Date.now() - waitStart > GATE_TIMEOUT_MS) {
+      onFree();
+      return;
+    }
+    if (checkClear()) {
+      onFree();
+      return;
+    }
+    setTimeout(poll, pollMs);
+  };
+  setTimeout(poll, pollMs);
+}
+
 function laneResId(x, z) {
   return `res_lane_${x.toFixed(3)}_${z.toFixed(3)}`;
 }
@@ -411,6 +463,75 @@ function isVehicleNearPhysically(x, z, radius = 1.5) {
     if (dx * dx + dz * dz <= r2) return true;
   }
   return false;
+}
+
+/** 仅检查是否有其他机器人在 (x,z) 半径内（不含 excludeAgentId） */
+function isRobotAtPosition(x, z, excludeAgentId = null, radius = 1.0) {
+  const r2 = radius * radius;
+  for (const rb of chargingRobots) {
+    if (!rb?.model?.position) continue;
+    const id = `robot_${rb.id}`;
+    if (excludeAgentId && id === excludeAgentId) continue;
+    const dx = rb.model.position.x - x;
+    const dz = rb.model.position.z - z;
+    if (dx * dx + dz * dz <= r2) return true;
+  }
+  return false;
+}
+
+/** 进入下一节点前：等待下一节点 (toP) 无其他机器人 */
+function addGateWaitUntilNextNodeClear(tl, toP, agentId, radius = 1.0, pollMs = 200) {
+  if (!tl || !toP) return;
+  tl.call(() => {
+    const checkClear = () => !isRobotAtPosition(toP.x, toP.z, agentId, radius);
+    if (checkClear()) return;
+    tl.pause();
+    const waitStart = Date.now();
+    const poll = () => {
+      if (!tl || !tl.paused()) return;
+      if (Date.now() - waitStart > GATE_TIMEOUT_MS) {
+        console.warn(`⚠️ ${agentId} next-node-clear gate timeout at (${toP.x.toFixed(1)}, ${toP.z.toFixed(1)}), forcing resume`);
+        tl.resume();
+        return;
+      }
+      if (checkClear()) {
+        tl.resume();
+        return;
+      }
+      setTimeout(poll, pollMs);
+    };
+    setTimeout(poll, pollMs);
+  });
+}
+
+/** 从 Cxx_0 进入下一节点前：等待整段 (fromP->toP) 节点与边上无其他机器人 */
+function addGateWaitUntilSegmentClear(tl, fromP, toP, agentId, radius = 1.0, pollMs = 200) {
+  if (!tl || !fromP || !toP) return;
+  const points = [
+    { x: fromP.x, z: fromP.z },
+    { x: (fromP.x + toP.x) / 2, z: (fromP.z + toP.z) / 2 },
+    { x: toP.x, z: toP.z }
+  ];
+  tl.call(() => {
+    const checkClear = () => points.every(p => !isRobotAtPosition(p.x, p.z, agentId, radius));
+    if (checkClear()) return;
+    tl.pause();
+    const waitStart = Date.now();
+    const poll = () => {
+      if (!tl || !tl.paused()) return;
+      if (Date.now() - waitStart > GATE_TIMEOUT_MS) {
+        console.warn(`⚠️ ${agentId} segment-clear gate timeout, forcing resume`);
+        tl.resume();
+        return;
+      }
+      if (checkClear()) {
+        tl.resume();
+        return;
+      }
+      setTimeout(poll, pollMs);
+    };
+    setTimeout(poll, pollMs);
+  });
 }
 
 function addGateWaitBeforeConflict(tl, x, z, agentId, horizonSec = 3, radiusCells = 1, pollMs = 200) {
@@ -1403,34 +1524,32 @@ class ChargingRobot {
     const rot = (dx, dz) => Math.atan2(dx, dz) + Math.PI / 2 + ROBOT_ROT_EXTRA;
 
     // NOTE: We overlap rotate + translate to avoid "stop at every node".
-    // Track current heading to ensure proper angle normalization
-    let trackedHeading = this.model.rotation?.y ?? 0;
+    // Track current heading in [-π,π] to avoid 360° spin at Cxx_0 etc.
+    let trackedHeading = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
+    const MIN_SEG_LEN_FOR_ROTATE = 0.1; // 极短/零长段不转向，避免原地转一圈
     const addPathSegment = (from, to, doRotate = true) => {
       const dx = to.x - from.x;
       const dz = to.z - from.z;
       const len = Math.hypot(dx, dz);
       const minDur = 0.05;
       const dur = Math.max(minDur, len / SPEED);
-      const rawAngle = rot(dx, dz);
-      // Normalize to shortest rotation path using tracked heading
+      const rawAngle = len >= MIN_SEG_LEN_FOR_ROTATE ? rot(dx, dz) : trackedHeading;
       const angle = normalizeAngleShortestPath(trackedHeading, rawAngle);
+      const angleNorm = normalizeAngleToMinusPiPi(angle);
       const turnDur = 0.25;
-      if (doRotate) {
-        mainTl.to(this.model.rotation, { 
-          y: angle, 
-          duration: turnDur, 
+      const needRotate = doRotate && len >= MIN_SEG_LEN_FOR_ROTATE && Math.abs(angleDiff(trackedHeading, angleNorm)) > 0.02;
+      if (needRotate) {
+        mainTl.to(this.model.rotation, {
+          y: angleNorm,
+          duration: turnDur,
           ease: "power1.inOut",
-          onComplete: () => {
-            // Update tracked heading after rotation completes
-            trackedHeading = angle;
-          }
+          onComplete: () => { trackedHeading = angleNorm; }
         });
         mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
       } else {
         mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
+        if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
       }
-      // Update tracked heading immediately for next segment
-      if (doRotate) trackedHeading = angle;
       return true;
     };
 
@@ -1461,6 +1580,14 @@ class ChargingRobot {
         if (to?.type === 'conflict') {
           addApproachCFWaitingRule(mainTl, from, to, agentId);
           addGateWaitBeforeConflict(mainTl, toP.x, toP.z, agentId, 3, 1, 200);
+        } else {
+          // 进入下一节点前：若当前在 Cxx_0 则等整段 (R:MPx->下一节点) 无其他机器人；否则仅当下一节点为 R:MP 时等该 MP 无机器人（进入 R:MP9 只判 R:MP9，不判 C9_0）
+          if (from?.type === 'charge0') {
+            const fromMP = getMovePointPosition(from.spotIndex);
+            if (fromMP) addGateWaitUntilSegmentClear(mainTl, fromMP, toP, agentId);
+          } else if (to?.type !== 'charge0') {
+            addGateWaitUntilNextNodeClear(mainTl, toP, agentId);
+          }
         }
         if (isCrossingSegment(from, to)) {
           if (addCrossing(fromP, toP)) prev = toP;
@@ -1751,28 +1878,26 @@ class ChargingRobot {
     };
 
     const runReturnHome = () => {
-    // NOTE: Overlap rotate + translate to avoid stopping at every node.
-    // Track current heading to ensure proper angle normalization
-    let trackedHeading = this.model.rotation?.y ?? 0;
+    let trackedHeading = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
+    const MIN_SEG_LEN_FOR_ROTATE = 0.1;
     const addPathSegment = (from, to) => {
       const dx = to.x - from.x;
       const dz = to.z - from.z;
       const len = Math.hypot(dx, dz);
       const minDur = 0.05;
       const dur = Math.max(minDur, len / SPEED);
-      const rawAngle = rot(dx, dz);
+      const rawAngle = len >= MIN_SEG_LEN_FOR_ROTATE ? rot(dx, dz) : trackedHeading;
       const angle = normalizeAngleShortestPath(trackedHeading, rawAngle);
+      const angleNorm = normalizeAngleToMinusPiPi(angle);
       const turnDur = 0.25;
-      tl.to(this.model.rotation, { 
-        y: angle, 
-        duration: turnDur, 
-        ease: "power1.inOut",
-        onComplete: () => {
-          trackedHeading = angle;
-        }
-      });
-      tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
-      trackedHeading = angle; // Update immediately for next segment
+      const needRotate = len >= MIN_SEG_LEN_FOR_ROTATE && Math.abs(angleDiff(trackedHeading, angleNorm)) > 0.02;
+      if (needRotate) {
+        tl.to(this.model.rotation, { y: angleNorm, duration: turnDur, ease: "power1.inOut", onComplete: () => { trackedHeading = angleNorm; } });
+        tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
+      } else {
+        tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
+        if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
+      }
       return true;
     };
     const addCrossing = (from, to) => {
@@ -1803,7 +1928,7 @@ class ChargingRobot {
       if (likelyCiToMP) {
         addGateWaitForCiToMP(tl, prev, startMP, SPEED, agentId, 200);
         addCiToMPManeuver(tl, this.model, prev, startMP, SPEED, rot, ROBOT_Y_OFFSET);
-        tl.call(() => { trackedHeading = this.model.rotation.y; });
+        tl.call(() => { trackedHeading = normalizeAngleToMinusPiPi(this.model.rotation.y); });
         prev = startMP;
       } else if (distToStart > 0.5) {
         if (addPathSegment(prev, startMP)) prev = startMP;
@@ -1819,7 +1944,14 @@ class ChargingRobot {
       if (to?.type === 'conflict') {
         addApproachCFWaitingRule(tl, from, to, agentId);
         addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 200);
-      }
+        } else {
+          if (from?.type === 'charge0') {
+            const fromMP = getMovePointPosition(from.spotIndex);
+            if (fromMP) addGateWaitUntilSegmentClear(tl, fromMP, toP, agentId);
+          } else if (to?.type !== 'charge0') {
+            addGateWaitUntilNextNodeClear(tl, toP, agentId);
+          }
+        }
       if (isCrossingSegment(from, to)) {
         if (addCrossing(fromP, toP)) prev = toP;
       } else {
@@ -1922,27 +2054,25 @@ class ChargingRobot {
     };
 
     const runReturn = () => {
-      // NOTE: Overlap rotate + translate to avoid stopping at every node.
-      // Track current heading to ensure proper angle normalization
-      let trackedHeading = this.model.rotation?.y ?? 0;
+      let trackedHeading = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
+      const MIN_SEG_LEN_FOR_ROTATE = 0.1;
       const addPathSegment = (from, to) => {
         const dx = to.x - from.x;
         const dz = to.z - from.z;
         const len = Math.hypot(dx, dz);
         const dur = Math.max(0.05, len / SPEED);
-        const rawAngle = rot(dx, dz);
+        const rawAngle = len >= MIN_SEG_LEN_FOR_ROTATE ? rot(dx, dz) : trackedHeading;
         const angle = normalizeAngleShortestPath(trackedHeading, rawAngle);
+        const angleNorm = normalizeAngleToMinusPiPi(angle);
         const turnDur = 0.25;
-        tl.to(this.model.rotation, { 
-          y: angle, 
-          duration: turnDur, 
-          ease: "power1.inOut",
-          onComplete: () => {
-            trackedHeading = angle;
-          }
-        });
-        tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
-        trackedHeading = angle; // Update immediately for next segment
+        const needRotate = len >= MIN_SEG_LEN_FOR_ROTATE && Math.abs(angleDiff(trackedHeading, angleNorm)) > 0.02;
+        if (needRotate) {
+          tl.to(this.model.rotation, { y: angleNorm, duration: turnDur, ease: "power1.inOut", onComplete: () => { trackedHeading = angleNorm; } });
+          tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
+        } else {
+          tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
+          if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
+        }
         // If a new order arrives while returning to rest, reroute at the next node.
         tl.call(() => {
           if (this.returnReason !== 'rest') return;
@@ -1985,7 +2115,7 @@ class ChargingRobot {
         if (likelyCiToMP) {
           addGateWaitForCiToMP(tl, prev, startMP, SPEED, agentId, 200);
           addCiToMPManeuver(tl, this.model, prev, startMP, SPEED, rot, ROBOT_Y_OFFSET);
-          tl.call(() => { trackedHeading = this.model.rotation.y; });
+          tl.call(() => { trackedHeading = normalizeAngleToMinusPiPi(this.model.rotation.y); });
           prev = startMP;
         } else if (distToStart > 0.5) {
           if (addPathSegment(prev, startMP)) prev = startMP;
@@ -2001,6 +2131,13 @@ class ChargingRobot {
         if (to?.type === 'conflict') {
           addApproachCFWaitingRule(tl, from, to, agentId);
           addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 200);
+        } else {
+          if (from?.type === 'charge0') {
+            const fromMP = getMovePointPosition(from.spotIndex);
+            if (fromMP) addGateWaitUntilSegmentClear(tl, fromMP, toP, agentId);
+          } else if (to?.type !== 'charge0') {
+            addGateWaitUntilNextNodeClear(tl, toP, agentId);
+          }
         }
         if (isCrossingSegment(from, to)) {
           if (addCrossing(fromP, toP)) prev = toP;
@@ -2197,7 +2334,7 @@ batteryStationSpots.forEach((spot, idx) => {
       // Position at parking spot center
       batteryModel.position.set(spot.x, 0, spot.z);
       // Rotate to face the lane (90 degrees for spots on left side)
-      batteryModel.rotation.y = spot.side === 'left' ? 0 : -Math.PI / 2;
+      batteryModel.rotation.y = spot.side === 'left' ? 0 : 0;
       batteryModel.traverse((obj) => {
         if (obj.isMesh) {
           obj.castShadow = true;
@@ -2825,14 +2962,17 @@ function createVehicleSequence() {
           appendSmartPathMotion(enterTl, car, smartPath, VEHICLE_SPEED, VEHICLE_Y);
         };
 
-        // Wait for gate resources (cp, lane) then run Pure Pursuit path entrance -> spot
-        if (cp) {
-          waitForResourceAndPoint(cp.x, cp.z, mpResId(selectedSpot.index), agentId, 0.8, 200, () => {
+        // 车辆转弯进入车位前：先等 R:MP(slot)、C_next_0->R:MP、C_next->R:MP 段无机器人，再等 cp/lane 资源后驶入
+        const proceedToResourceAndPath = () => {
+          if (cp) {
+            waitForResourceAndPoint(cp.x, cp.z, mpResId(selectedSpot.index), agentId, 0.8, 200, () => {
+              waitForResourceAndPoint(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0, laneResId(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0), agentId, 0.8, 200, runFullPathToSpot);
+            });
+          } else {
             waitForResourceAndPoint(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0, laneResId(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0), agentId, 0.8, 200, runFullPathToSpot);
-          });
-        } else {
-          waitForResourceAndPoint(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0, laneResId(targetParkingSpot.x, selectedSpot.index >= 25 ? -6.5 : -23.0), agentId, 0.8, 200, runFullPathToSpot);
-        }
+          }
+        };
+        waitUntilSlotApproachClear(selectedSpot.index, 200, proceedToResourceAndPath);
         };
 
         const tryStartEnter = () => {
@@ -2846,9 +2986,10 @@ function createVehicleSequence() {
 
         // After charging, vehicle leaves
         const checkAndLeave = () => {
+          if (vehicle.phase === 'leaving') return; // already in leave timeline, avoid starting a second one (would jump car back to spot)
           if (!vehicle.needsCharging) {
-            if (isVehicleBehindOnLane(vehicles, selectedSpot.index, targetParkingSpot.x, vehicle.id) ||
-                isVehicleAheadOnExitLane(vehicles, selectedSpot.index, targetParkingSpot.x, vehicle.id)) {
+            if (isVehicleInReverseSafetyZone(vehicles, selectedSpot.index, vehicle.id, getVehicleNodePos) ||
+                isRobotInReverseSafetyZone(chargingRobots, selectedSpot.index)) {
               setTimeout(checkAndLeave, 300);
               return;
             }
@@ -2927,6 +3068,8 @@ function createVehicleSequence() {
             addGateWaitAtResourceAndPoint(leaveTl, lanePoint.x, lanePoint.z, laneResId(lanePoint.x, lanePoint.z), agentId, 0.8, 200, false);
             addReReserveAtPoint(leaveTl, agentId, fullReversePath, VEHICLE_SPEED, RESERVE_WINDOW_SEC);
             appendVehicleReverseMotion(leaveTl, car, pathForMotion, VEHICLE_SPEED, VEHICLE_Y, { minSegDur: 0.08 });
+            // Normalize rotation to [-PI, PI] so forward segment tween takes shortest path (avoids 360° spin)
+            leaveTl.call(() => { car.rotation.y = normalizeAngleToMinusPiPi(car.rotation.y); });
 
             if (exitSmartPath.length > 0) {
               if (pathUsesExitCorridor(denseExitForward)) {
@@ -2988,6 +3131,14 @@ const VEHICLE_MAX_STEERING_ANGLE = Math.PI / 4.5; // ~40 degrees (smaller turn r
 const VEHICLE_MODEL_Y_OFFSET = Math.PI / 2;
 
 const minSegDur = 0.05;
+
+/** Normalize angle to [-PI, PI] so GSAP rotation tween takes shortest path (avoids 360° spin after reverse). */
+function normalizeAngleToMinusPiPi(angle) {
+  let a = angle;
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
+}
 
 /**
  * Execute a smart path (STRAIGHT + ARC instructions) on a GSAP timeline at constant speed.
@@ -3107,7 +3258,8 @@ function buildPrecomputedTrajectories() {
       ? smartPathToDensePoints(enterSmartPath, 0.5)
       : densifyWaypoints(planVehicleEnterTrajectory(spot.index, spotCenter, 1.2));
 
-    const slotArc = getSlotTurnArcForEgress(spot.index, spotCenter);
+    // Exit "spot → lane" = exact reverse of enter "lane → spot": same arc (from enter smart path), same straight (reversed).
+    const slotArc = getSlotTurnArcForEgress(spot.index, spotCenter); // same arc as enter's last ARC, arcStart=lane, arcEnd=spot side
     const exitKps = getVehicleTrajectoryKeypoints(spot.index, spotCenter, 'exit');
     const lanePoint = slotArc
       ? slotArc.arcStart
@@ -3117,8 +3269,8 @@ function buildPrecomputedTrajectories() {
       ? buildSmartPath([{ ...lanePoint, id: getSlotTurnId(spot.index) }, exitKps[2], exitKps[3]], getTurnRadiusForKeypoint)
       : planVehicleExitSmartPath(spot.index, spotCenter);
 
-    const reverseArcPoints = slotArc ? sampleArcReverse(slotArc, 0.85) : [];
-    const straightToArcEnd = cp ? [spotCenter, cp, slotArc?.arcEnd].filter(Boolean) : (slotArc ? [spotCenter, slotArc.arcEnd] : null);
+    const reverseArcPoints = slotArc ? sampleArcReverse(slotArc, 0.85) : []; // arcEnd → arcStart (same arc as enter, reversed)
+    const straightToArcEnd = cp ? [spotCenter, cp, slotArc?.arcEnd].filter(Boolean) : (slotArc ? [spotCenter, slotArc.arcEnd] : null); // reverse of enter's arcEnd→(cp?)→spot
     const fullReversePath = slotArc && straightToArcEnd?.length
       ? [...straightToArcEnd, ...reverseArcPoints.slice(1)]
       : (cp ? [spotCenter, cp, lanePoint] : [spotCenter, lanePoint]);
