@@ -15,6 +15,17 @@ function socColor(soc: number) {
   return '#f85149';
 }
 
+function stateLabel(state: string) {
+  const labels: Record<string, string> = {
+    idle: '空闲',
+    navigating: '导航中',
+    charging: '充电中',
+    selfCharging: '自充电',
+    returning: '返回中',
+  };
+  return labels[state] ?? state;
+}
+
 export function SOCPanel({ robots: robotsProp }: { robots?: RobotStatus[] | null }) {
   const robots = robotsProp ?? mockRobots;
   const [followedId, setFollowedId] = useState<number | null>(null);
@@ -28,15 +39,18 @@ export function SOCPanel({ robots: robotsProp }: { robots?: RobotStatus[] | null
   };
 
   return (
-    <Card variant="outlined" sx={{ maxHeight: 200, display: 'flex', flexDirection: 'column', bgcolor: 'background.paper' }}>
+    <Card variant="outlined" sx={{ maxHeight: 320, display: 'flex', flexDirection: 'column', bgcolor: 'background.paper' }}>
       <CardContent sx={{ py: 1, px: 1.5, overflow: 'auto', flex: 1, minHeight: 0 }}>
         <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600, fontSize: '0.7rem' }}>
-          Robot SOC <Typography component="span" variant="caption" sx={{ ml: 0.5, opacity: 0.8 }}>(Click ID to follow)</Typography>
+          Robot Status <Typography component="span" variant="caption" sx={{ ml: 0.5, opacity: 0.8 }}>(Click ID to follow)</Typography>
         </Typography>
         <Box sx={{ mt: 0.75, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           {robots.map((r) => {
             const robotId = parseInt(r.id.replace(/^R/i, ''), 10);
             const isFollowed = !Number.isNaN(robotId) && followedId === robotId;
+            const pos = r.position;
+            const posStr = pos != null ? `(${pos.x.toFixed(1)}, ${pos.z.toFixed(1)})` : '—';
+            const headingStr = r.heading != null ? `${r.heading.toFixed(1)}°` : '—';
             return (
             <Box key={r.id}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.25 }}>
@@ -61,6 +75,14 @@ export function SOCPanel({ robots: robotsProp }: { robots?: RobotStatus[] | null
                 </Button>
                 <Typography variant="caption" fontFamily="JetBrains Mono" color={socColor(r.soc)} sx={{ fontSize: '0.7rem' }}>
                   {r.soc}%
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.15, mb: 0.25, pl: 0.5 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                  SOC: {r.soc}% · {stateLabel(r.state)}
+                </Typography>
+                <Typography variant="caption" fontFamily="JetBrains Mono" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                  pos: {posStr} · heading: {headingStr}
                 </Typography>
               </Box>
               <LinearProgress

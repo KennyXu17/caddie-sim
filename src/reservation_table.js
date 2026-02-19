@@ -155,6 +155,18 @@ export function isResourceAvailableInRange(resourceId, tStart, tEnd, excludeAgen
 }
 
 /**
+ * 获取当前占用某资源的 agentId（用于调试可视化）
+ */
+export function getResourceOwner(resourceId) {
+  const tNow = getSimTime();
+  for (const r of reservations) {
+    if (r.cellId !== resourceId) continue;
+    if (tNow >= r.tStart && tNow <= r.tEnd) return r.agentId;
+  }
+  return null;
+}
+
+/**
  * 释放某 agent 的所有预定
  */
 export function releaseAgent(agentId) {

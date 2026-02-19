@@ -5,6 +5,7 @@ export interface RobotStatus {
   soc: number;
   state: string; // from sim: 'idle'|'navigating'|'charging'|'selfCharging'|'returning'
   position?: { x: number; y?: number; z: number };
+  heading?: number; // 0°=North(-Z), 90°=East(+X), 180°=South(+Z), 270°=West(-X)
 }
 
 export interface SimulatorState {

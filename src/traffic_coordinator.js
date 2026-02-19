@@ -8,13 +8,57 @@
 
 import { getVehicleLaneGraphData, getReverseSafetyZoneVehicleNodeIds } from './vehicle_lane_graph.js';
 import { getMovePointPosition } from './topology.js';
+import { getSlotTurnArcForEgress, sampleArcReverse } from './keypoint_graph.js';
 
 /** 冲突段：垂直路段 x=20.25, z∈[-22.5,-6.5]，严格限于路段内 */
 export const CONFLICT_SEGMENT = { x: 20.25, zMin: -22.5, zMax: -6.5, xMargin: 0.5 };
 export const CAR_LENGTH = 4.2;
 
-/** 倒车安全区检测半径（节点/边附近） */
-const REVERSE_ZONE_RADIUS = 2.5;
+/** 倒车/进出车位安全区检测半径（节点/边附近） */
+export const REVERSE_ZONE_RADIUS = 2.5;
+
+/** 倒车扫掠矩形边距 (m) */
+const SWEPT_RECT_MARGIN = 0.5;
+
+/**
+ * 倒车扫掠矩形：根据车位方向和倒车路径，计算车辆后退覆盖的矩形区域（含边距）
+ * @param {number} slotIndex
+ * @param {{x,z}} slotCenter
+ * @param {{x,z}|null} chargePoint - 充电点，可选
+ * @returns {{ minX, maxX, minZ, maxZ } | null}
+ */
+export function getReverseSweptRect(slotIndex, slotCenter, chargePoint = null) {
+  const laneZ = slotIndex >= 25 ? -6.5 : -23.0;
+  const laneAtSlot = { x: slotCenter.x, z: laneZ };
+  const points = [{ x: slotCenter.x, z: slotCenter.z }];
+  if (chargePoint) points.push({ x: chargePoint.x, z: chargePoint.z });
+  const slotArc = getSlotTurnArcForEgress(slotIndex, slotCenter);
+  if (slotArc) {
+    points.push(slotArc.arcEnd);
+    points.push(...sampleArcReverse(slotArc, 0.5));
+    points.push(slotArc.arcStart);
+  }
+  points.push(laneAtSlot);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  const halfWidth = CAR_LENGTH / 2;
+  return {
+    minX: minX - halfWidth - SWEPT_RECT_MARGIN,
+    maxX: maxX + halfWidth + SWEPT_RECT_MARGIN,
+    minZ: minZ - halfWidth - SWEPT_RECT_MARGIN,
+    maxZ: maxZ + halfWidth + SWEPT_RECT_MARGIN
+  };
+}
+
+/** 点是否在矩形内 */
+function pointInRect(x, z, rect) {
+  return x >= rect.minX && x <= rect.maxX && z >= rect.minZ && z <= rect.maxZ;
+}
 
 /** Row 3 (25-34): turn_3_right -> MP34 -> ... -> MP25. Row 4 (35-44): turn_4_left -> MP35 -> ... -> MP44. */
 function getSpotRow(slotIndex) {
@@ -47,6 +91,21 @@ export function getReverseSafetyZoneRobotSpotIndices(slotIndex) {
     for (let i = slotIndex; i <= end; i++) out.push(i);
   }
   return out;
+}
+
+/** 同行 R:MP 边的方向：Row1/3 右->左(高->低)，Row2/4 左->右(低->高)。返回 zone 内边的 [{from,to}, ...] */
+function getRobotZoneEdgeSegments(slotIndex) {
+  const indices = getReverseSafetyZoneRobotSpotIndices(slotIndex);
+  if (indices.length < 2) return [];
+  const row = getSpotRow(slotIndex);
+  const sorted = [...indices].sort((a, b) => a - b);
+  const edges = [];
+  if (row === 1 || row === 3) {
+    for (let i = sorted.length - 1; i >= 1; i--) edges.push({ from: sorted[i], to: sorted[i - 1] });
+  } else {
+    for (let i = 0; i < sorted.length - 1; i++) edges.push({ from: sorted[i], to: sorted[i + 1] });
+  }
+  return edges;
 }
 
 /**
@@ -84,7 +143,28 @@ export function getReverseSafetyZoneCheckPoints(slotIndex, getVehicleNodePos) {
     const p = getMovePointPosition(spotIdx);
     if (p && typeof p.x === 'number' && typeof p.z === 'number') robotPoints.push({ x: p.x, z: p.z });
   }
+  // 边采样：R:MPi->R:MPj 上采样点，避免机器人在边上移动时漏检
+  const EDGE_SAMPLE_STEP = 0.5;
+  for (const { from: fromIdx, to: toIdx } of getRobotZoneEdgeSegments(slotIndex)) {
+    const a = getMovePointPosition(fromIdx);
+    const b = getMovePointPosition(toIdx);
+    if (!a || !b || typeof a.x !== 'number' || typeof b.x !== 'number') continue;
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) continue;
+    const steps = Math.max(1, Math.ceil(len / EDGE_SAMPLE_STEP));
+    for (let s = 1; s < steps; s++) {
+      const t = s / steps;
+      robotPoints.push({ x: a.x + t * dx, z: a.z + t * dz });
+    }
+  }
   return { vehiclePoints, robotPoints };
+}
+
+/** 车位上下游机器人 graph 检测点（节点 + 边上采样），用于车辆进/出前的机器人检查 */
+export function getSpotUpstreamRobotCheckPoints(slotIndex) {
+  return getReverseSafetyZoneCheckPoints(slotIndex, null).robotPoints;
 }
 
 /**
@@ -110,9 +190,24 @@ export function isVehicleInReverseSafetyZone(vehicles, slotIndex, excludeVehicle
 }
 
 /**
- * True if any robot is within REVERSE_ZONE_RADIUS of the reverse safety zone (R:MP nodes).
+ * True if any robot falls inside the reverse swept rectangle (or legacy point-based zone).
+ * 当提供 slotCenter 时使用倒车扫掠矩形；否则回退到离散采样点检测。
+ * @param {Array} robots - chargingRobots
+ * @param {number} slotIndex
+ * @param {{x,z}|null} [slotCenter] - 车位中心，提供时使用 swept rect
+ * @param {{x,z}|null} [chargePoint] - 充电点，slotCenter 存在时可选
  */
-export function isRobotInReverseSafetyZone(robots, slotIndex) {
+export function isRobotInReverseSafetyZone(robots, slotIndex, slotCenter = null, chargePoint = null) {
+  if (slotCenter) {
+    const rect = getReverseSweptRect(slotIndex, slotCenter, chargePoint);
+    if (!rect) return false;
+    for (const r of robots) {
+      if (!r.model || !r.model.position) continue;
+      const p = r.model.position;
+      if (pointInRect(p.x, p.z, rect)) return true;
+    }
+    return false;
+  }
   const { robotPoints } = getReverseSafetyZoneCheckPoints(slotIndex, null);
   if (!robotPoints.length) return false;
   const r2 = REVERSE_ZONE_RADIUS * REVERSE_ZONE_RADIUS;
