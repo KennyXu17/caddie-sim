@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAPass } from 'three/examples/jsm/postprocessing/FXAAPass.js';
@@ -26,7 +27,7 @@ import {
   REVERSE_ZONE_RADIUS
 } from './traffic_coordinator.js';
 import { 
-  reservePath, reservePoint, reserveResource, releaseAgent, getSimTime, setSimTimeScale,
+  reservePath, reservePoint, reserveResource, releaseAgent, getSimTime, getSimTimeScale, setSimTimeScale,
   isPathBlocked, isAvailableInRange, isResourceAvailableInRange, 
   willBeOccupiedByVehicleNear, CELL_SIZE, PRIORITY,
   setAgentPriority, getAgentPriority, startAutoCleanup, cleanupExpiredReservations,
@@ -47,6 +48,13 @@ import {
   getMinTurnDurationForForce
 } from './vehicle_steering.js';
 if (typeof window !== 'undefined') window.STEERING_CONFIG = STEERING_CONFIG;
+
+// Helper: schedule callback after given SIM-TIME seconds (converted using current sim speed).
+function setTimeoutSim(fn, simSeconds) {
+  const scale = Math.max(0.1, getSimTimeScale());
+  const delayMs = (simSeconds / scale) * 1000;
+  return setTimeout(fn, delayMs);
+}
 
 const PARKING_LOT_BOUNDS = {
   topLeft: { x: LOT_BOUNDS.minX, z: LOT_BOUNDS.minZ },
@@ -245,9 +253,9 @@ function addGateWaitAtPoint(tl, x, z, agentId, holdSec = 0.8, pollMs = 200) {
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -278,9 +286,9 @@ function waitForResourceAndPoint(x, z, resourceId, agentId, holdSec, pollMs, onF
       onFree();
       return;
     }
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   };
-  setTimeout(poll, pollMs);
+  setTimeoutSim(poll, pollMs / 1000);
 }
 
 /**
@@ -339,9 +347,9 @@ function waitUntilSlotApproachClear(slotIndex, pollMs, onFree) {
       onFree();
       return;
     }
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   };
-  setTimeout(poll, pollMs);
+  setTimeoutSim(poll, pollMs / 1000);
 }
 
 function laneResId(x, z) {
@@ -401,9 +409,9 @@ function addGateWaitForExitCorridor(tl, agentId, transitTimeSec = 3, pollMs = 20
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -442,16 +450,18 @@ function addGateWaitAtResourceAndPoint(tl, x, z, resourceId, agentId, holdSec = 
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
 function isOccupiedPhysically(x, z, excludeAgentId = null, radius = 1.0) {
   const r2 = radius * radius;
   for (const v of vehicles) {
-    if (!v?.model?.position) continue;
+    if (!v?.model?.position || v.phase === 'gone') continue;
+    // Parked vehicles stay in their spots; do not treat them as blocking lane/charge points for others.
+    if (v.phase === 'parked') continue;
     const id = `vehicle_${v.id}`;
     if (excludeAgentId && id === excludeAgentId) continue;
     const dx = v.model.position.x - x;
@@ -472,7 +482,8 @@ function isOccupiedPhysically(x, z, excludeAgentId = null, radius = 1.0) {
 function isVehicleNearPhysically(x, z, radius = 1.5) {
   const r2 = radius * radius;
   for (const v of vehicles) {
-    if (!v?.model?.position) continue;
+    if (!v?.model?.position || v.phase === 'gone') continue;
+    if (v.phase === 'parked') continue;
     const dx = v.model.position.x - x;
     const dz = v.model.position.z - z;
     if (dx * dx + dz * dz <= r2) return true;
@@ -495,7 +506,9 @@ function isRobotAtPosition(x, z, excludeAgentId = null, radius = 1.0) {
 }
 
 const SWEPT_HORIZON_SEC = 2;
-const SWEPT_NEAR_RADIUS = 10;
+// Reduce robot conflict check radius so parked vehicles in nearby slots are less likely
+// to be treated as blockers when they are not actually in the robot's path.
+const SWEPT_NEAR_RADIUS = 5;
 const SAFETY_BUFFER = 0.5;
 // 胶囊体：车辆前进方向长度5m、宽度2m；机器人前进方向长度2m、宽度0.75m
 const ROBOT_CAPSULE_HALFLEN = 1;      // 2/2
@@ -538,6 +551,8 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
 
   for (const rb of chargingRobots) {
     if (!rb?.model?.position) continue;
+    // Ignore robots that are charging a vehicle; they stay at the spot and should not block moving robots.
+    if (rb.state === 'charging') continue;
     const otherId = `robot_${rb.id}`;
     const heading = rb.model.rotation?.y ?? 0;
     const blocker = checkOther(rb.model.position, otherId, false, heading, ROBOT_CAPSULE_HALFLEN, ROBOT_CAPSULE_R);
@@ -545,6 +560,9 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
   }
   for (const v of vehicles) {
     if (!v?.model?.position || v.phase === 'gone') continue;
+    // Ignore vehicles that are fully parked in slots; only treat moving/entering/leaving
+    // vehicles as dynamic obstacles for robot path prediction.
+    if (v.phase === 'parked') continue;
     const otherId = `vehicle_${v.id}`;
     const heading = v.model.rotation?.y ?? 0;
     const blocker = checkOther(v.model.position, otherId, true, heading, VEHICLE_CAPSULE_HALFLEN, VEHICLE_CAPSULE_R);
@@ -671,9 +689,9 @@ function addGateWaitBeforeConflict(tl, x, z, agentId, horizonSec = 3, radiusCell
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -701,9 +719,9 @@ function addGateWaitForCiToMP(tl, fromCi, toMP, SPEED, agentId, pollMs = 200) {
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -1012,7 +1030,7 @@ console.log = function (...args) {
 
 // === Scene Setup ===
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xc8d0e0); // 淡蓝灰，略暗
+scene.background = new THREE.Color(0x99ccff); // 天空蓝偏淡 (Lighter Sky Blue)
 
 // Vehicle trajectory visualization: record positions and draw trails
 const vehicleTrajectories = new Map(); // vehicleId -> { points: [], line: THREE.Line, lastRecorded }
@@ -1039,23 +1057,24 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.85;
+renderer.toneMappingExposure = 0.64; // 稍亮
+if (typeof renderer.useLegacyLights !== 'undefined') renderer.useLegacyLights = false; // 物理灯光衰减
 simContainer.appendChild(renderer.domElement);
 renderer.domElement.style.width = (simContainer === document.body ? window.innerWidth : simContainer.clientWidth) + 'px';
 renderer.domElement.style.height = (simContainer === document.body ? window.innerHeight : simContainer.clientHeight) + 'px';
 renderer.domElement.style.display = 'block';
 
 // === Lights ===
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.36);
 scene.add(ambientLight);
 
-// 半球光 - 为 PBR 材质提供更自然的环境光照
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+// 半球光 - 为 PBR 材质提供更自然的环境光照（略偏暖以配合夕阳）
+const hemiLight = new THREE.HemisphereLight(0xffeedd, 0x442211, 0.68);
 hemiLight.position.set(0, 50, 0);
 scene.add(hemiLight);
 
-// Sunlight: angled, high-quality soft shadows
-const dirLight = new THREE.DirectionalLight(0xfff5e6, 1.15);
+// Sunlight: angled, high-quality soft shadows（暖色夕阳感）
+const dirLight = new THREE.DirectionalLight(0xffdd99, 0.66);
 dirLight.position.set(28, 42, 24);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.width = 4096;
@@ -1068,18 +1087,19 @@ dirLight.shadow.camera.top = 55;
 dirLight.shadow.camera.bottom = -55;
 dirLight.shadow.bias = -0.0001;
 dirLight.shadow.normalBias = 0.02;
+if (typeof dirLight.shadow.radius !== 'undefined') dirLight.shadow.radius = 6; // 柔化阴影边缘
 scene.add(dirLight);
 
 // === HDR environment lighting (IBL + PMREM for reflections) ===
 const envScene = new THREE.Scene();
-envScene.background = new THREE.Color(0xffffff);
-const envLight1 = new THREE.DirectionalLight(0xffffff, 0.5);
+envScene.background = new THREE.Color(0xe0e0e0);
+const envLight1 = new THREE.DirectionalLight(0xffffff, 0.35);
 envLight1.position.set(1, 1, 1);
 envScene.add(envLight1);
-const envLight2 = new THREE.DirectionalLight(0xaaccff, 0.35);
+const envLight2 = new THREE.DirectionalLight(0xaaccff, 0.2);
 envLight2.position.set(-1, 1, -1);
 envScene.add(envLight2);
-envScene.add(new THREE.AmbientLight(0xffffff, 0.7));
+envScene.add(new THREE.AmbientLight(0xffffff, 0.5));
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
 let envMapFallback = pmremGenerator.fromScene(envScene).texture;
@@ -1100,17 +1120,23 @@ rgbeLoader.load(
   () => { scene.environment = envMapFallback; }
 );
 
-// Light gray atmospheric fog for distance realism
-scene.fog = new THREE.FogExp2(0xc0c4cc, 0.012);
+// 无雾效
+scene.fog = null;
 
-// === Postprocessing (Bloom low intensity + FXAA) ===
+// === Postprocessing (SSAO + Bloom + FXAA，照片级真实感) ===
 const composer = new EffectComposer(renderer);
 composer.setSize(initW, initH);
 composer.setPixelRatio(renderer.getPixelRatio());
 composer.addPass(new RenderPass(scene, camera));
+const ssaoPass = new SSAOPass(scene, camera, initW, initH);
+ssaoPass.kernelRadius = 6;
+ssaoPass.minDistance = 0.005;
+ssaoPass.maxDistance = 0.12;
+ssaoPass.output = SSAOPass.OUTPUT.Default;
+composer.addPass(ssaoPass);
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(initW, initH),
-  0.18,
+  0.22,
   0.4,
   0.88
 );
@@ -1134,7 +1160,8 @@ const decalGround = new THREE.Mesh(decalGroundGeo, decalGroundMat);
 decalGround.rotation.x = -Math.PI / 2;
 decalGround.position.set(decalGroundCx, 0, decalGroundCz);
 decalGround.receiveShadow = true;
-scene.add(decalGround);
+// 移除与停车场同大的黑色/深色背景图，不加入场景
+// scene.add(decalGround);
 
 const groundTexLoader = new THREE.TextureLoader();
 const asphaltRepeat = { x: 5, y: 5 };
@@ -1201,28 +1228,7 @@ const decalEuler2 = new THREE.Euler(Math.PI / 2, 0, -0.15);
 addDecal(decalGround, new THREE.Vector3(-10, 0.01, -12), new THREE.Vector3(2.5, 2.5, 0.3), decalEuler1);
 addDecal(decalGround, new THREE.Vector3(8, 0.01, -5), new THREE.Vector3(1.8, 1.8, 0.25), decalEuler2);
 
-// === Weather: rain particles ===
-const RAIN_COUNT = 2500;
-const rainGeo = new THREE.BufferGeometry();
-const rainPos = new Float32Array(RAIN_COUNT * 3);
-const rainBounds = { x: 60, z: 50, yMin: -5, yMax: 25 };
-for (let i = 0; i < RAIN_COUNT; i++) {
-  rainPos[i * 3] = (Math.random() - 0.5) * rainBounds.x;
-  rainPos[i * 3 + 1] = rainBounds.yMin + Math.random() * (rainBounds.yMax - rainBounds.yMin);
-  rainPos[i * 3 + 2] = (Math.random() - 0.5) * rainBounds.z;
-}
-rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
-rainGeo.computeBoundingSphere();
-const rainMat = new THREE.PointsMaterial({
-  color: 0xaaaaaa,
-  size: 0.08,
-  transparent: true,
-  opacity: 0.6,
-  sizeAttenuation: true
-});
-const rainPoints = new THREE.Points(rainGeo, rainMat);
-scene.add(rainPoints);
-const RAIN_SPEED = 18;
+// 无雨雪特效，保持晴朗
 
 /** 降低模型反光：遍历 mesh 及其子节点，对 PBR 材质设置 envMapIntensity、适度提高 roughness */
 function reduceReflections(obj, envMapIntensity = 0.3) {
@@ -1245,7 +1251,17 @@ controls.update();
 let followRobotId = null;
 if (typeof window !== 'undefined') {
   window.__requestFollowRobot = (id) => { followRobotId = id != null ? id : null; };
-  window.__requestSimSpeed = (scale) => { setSimTimeScale(scale); };
+  window.__requestSimSpeed = (scale) => {
+    const s = Number(scale) || 1;
+    // Update logical sim time scale (reservations, logs, exporters)
+    setSimTimeScale(s);
+    // Also speed up / slow down all GSAP timelines so visual motion matches sim speed
+    try {
+      gsap.globalTimeline.timeScale(s);
+    } catch {
+      // gsap may not be initialized yet; ignore
+    }
+  };
 }
 const FOLLOW_OFFSET_UP = 10;
 const FOLLOW_OFFSET_BACK = 14;
@@ -1256,6 +1272,12 @@ cameraInfoEl.id = 'camera-info';
 cameraInfoEl.style.cssText = 'position:fixed;bottom:12px;left:12px;background:rgba(0,0,0,0.85);color:#7dd3fc;padding:8px 12px;border-radius:6px;font-family:monospace;font-size:12px;pointer-events:none;z-index:10000;border:1px solid rgba(125,211,252,0.4);white-space:pre;';
 cameraInfoEl.style.display = 'none';
 document.body.appendChild(cameraInfoEl);
+
+// Sim time display (top-right), follows accelerated sim time (getSimTime / setSimTimeScale)
+const simTimeEl = document.createElement('div');
+simTimeEl.id = 'sim-time';
+simTimeEl.style.cssText = 'position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.85);color:#facc15;padding:6px 10px;border-radius:6px;font-family:monospace;font-size:12px;pointer-events:none;z-index:10000;border:1px solid rgba(250,204,21,0.5);';
+document.body.appendChild(simTimeEl);
 
 let cameraInfoVisible = false;
 let cameraInfoHideTimer = null;
@@ -1444,9 +1466,10 @@ let totalKwhDelivered = 0;
 const batteryStations = [];
 let parkingLot = null;
 
-const ROBOT_BATTERY_KWH = 100;
+// Robot battery capacity and thresholds (configurable)
+let ROBOT_BATTERY_KWH = 100;
 const VEHICLE_BATTERY_KWH = 80;
-const LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25; // 25%
+let LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25; // 25%
 const ROBOT_Y_OFFSET = 0;      // 小 caddie 高度偏移
 /** 朝向约定：-Z=北(0°)，+X=东(90°)，+Z=南(180°)，-X=西(270°)。机器人初始 heading=180°(南)。 */
 const ROBOT_ROT_EXTRA = Math.PI / 2 + Math.PI;  // 充电位姿等特殊朝向用
@@ -1473,6 +1496,55 @@ const debug_collision = (() => {
   }
 })();
 if (debug_collision) setDebugCollisionEnabled(true);
+
+// Vehicle model offset calibration: ?calibrate_vehicle=1 — show logical-position marker and live-adjust mesh offset
+const calibrate_vehicle = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get('calibrate_vehicle');
+    return v != null && ['1', 'true', 'yes', 'y', 'on'].includes(String(v).toLowerCase());
+  } catch {
+    return false;
+  }
+})();
+/** Live calibration state (mesh offset in car local space). Sync applied in animate() to first vehicle. */
+const vehicleOffsetCalibrate = { x: 3, y: -1, z: 0.5 };
+let calibrationMarker = null;
+let calibrationUIAdded = false;
+function ensureCalibrationUI() {
+  if (!calibrate_vehicle || calibrationUIAdded) return;
+  calibrationUIAdded = true;
+  const panel = document.createElement('div');
+  panel.id = 'vehicle-offset-calibrate';
+  panel.style.cssText = 'position:fixed;top:12px;left:12px;z-index:9999;background:rgba(0,0,0,0.85);color:#eee;padding:10px 14px;border-radius:8px;font-family:monospace;font-size:12px;min-width:200px;';
+  panel.innerHTML = `
+    <div style="margin-bottom:6px;font-weight:bold;">Vehicle mesh offset (calibrate)</div>
+    <div style="margin-bottom:4px;">X <input type="range" id="cal-off-x" min="-5" max="5" step="0.1" value="3" style="width:100px;vertical-align:middle;"> <span id="cal-val-x">3</span></div>
+    <div style="margin-bottom:4px;">Y <input type="range" id="cal-off-y" min="-3" max="1" step="0.1" value="-1" style="width:100px;vertical-align:middle;"> <span id="cal-val-y">-1</span></div>
+    <div style="margin-bottom:4px;">Z <input type="range" id="cal-off-z" min="-2" max="2" step="0.1" value="0.5" style="width:100px;vertical-align:middle;"> <span id="cal-val-z">0.5</span></div>
+    <div style="margin-top:8px;font-size:11px;color:#aaa;">Red sphere = logical position (car.position). Tune so model stays centered on it when car rotates.</div>
+    <button id="cal-copy" style="margin-top:6px;padding:4px 8px;cursor:pointer;">Copy: position.set(x, y, z)</button>
+  `;
+  (window.__simulatorContainer || document.body).appendChild(panel);
+  const updateFromInputs = () => {
+    vehicleOffsetCalibrate.x = parseFloat(document.getElementById('cal-off-x').value) || 0;
+    vehicleOffsetCalibrate.y = parseFloat(document.getElementById('cal-off-y').value) || 0;
+    vehicleOffsetCalibrate.z = parseFloat(document.getElementById('cal-off-z').value) || 0;
+    document.getElementById('cal-val-x').textContent = vehicleOffsetCalibrate.x.toFixed(2);
+    document.getElementById('cal-val-y').textContent = vehicleOffsetCalibrate.y.toFixed(2);
+    document.getElementById('cal-val-z').textContent = vehicleOffsetCalibrate.z.toFixed(2);
+  };
+  ['cal-off-x', 'cal-off-y', 'cal-off-z'].forEach(id => {
+    document.getElementById(id).addEventListener('input', updateFromInputs);
+  });
+  document.getElementById('cal-copy').addEventListener('click', () => {
+    const s = `carMesh.position.set(${vehicleOffsetCalibrate.x}, ${vehicleOffsetCalibrate.y}, ${vehicleOffsetCalibrate.z});`;
+    console.log(s);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(s);
+    document.getElementById('cal-copy').textContent = 'Copied to clipboard';
+    setTimeout(() => { document.getElementById('cal-copy').textContent = 'Copy: position.set(x, y, z)'; }, 1500);
+  });
+  updateFromInputs();
+}
 
 // Recording parameters from URL: ?record=true&start_time=20&end_time=40
 const recordConfig = (() => {
@@ -1623,6 +1695,10 @@ class ChargingRobot {
     // Set high priority for charging mission (robot actively servicing a vehicle)
     setAgentPriority(agentId, PRIORITY.ROBOT_CHARGING);
     const RESERVE_WINDOW_SEC = 1.2;
+    // Charging/discharging: C-rate * robot capacity per sim hour (1C = full ROBOT_BATTERY_KWH in 1 sim hour)
+    const CHARGE_RATE_KWH_PER_SEC = (CHARGE_SETTINGS.cRate * ROBOT_BATTERY_KWH) / 3600;
+    // Fallback charging duration (sim seconds) used for reservation windows; actual energy transfer
+    // duration is computed dynamically per session but reservations still need a finite window.
     const CHARGE_DURATION_SEC = 4;
     const startSpot = this.atHome ? (this.homeSpot?.index ?? 1) : this.lastSpotIndex;
     const endSpot = spot.index;
@@ -1735,7 +1811,7 @@ class ChargingRobot {
         }
       }
     }
-    const charge0Pos = getCharge0Position(spot.index) || { x: chargingPos.x + (spot.opening === '-z' ? 0.4 : -0.4), z: chargingPos.z, y: ROBOT_Y_OFFSET };
+    const charge0Pos = getCharge0Position(spot.index) || { x: chargingPos.x + (spot.opening === '-z' ? 0.35 : -0.35), z: chargingPos.z, y: ROBOT_Y_OFFSET };
     addGateWaitAtResourceAndPoint(mainTl, charge0Pos.x, charge0Pos.z, mpResId(spot.index), agentId, 0.8, 200, false);
 
     // 充电位姿：车位开口朝+z 时车头朝 x 负方向，否则朝 x 正方向
@@ -1808,8 +1884,9 @@ class ChargingRobot {
 
     const startDemand = Math.max(0, vehicle.chargeDemandKwh ?? 0);
     const startBattery = this.batteryLevel;
-    const chargeDuration = CHARGE_DURATION_SEC;
     const maxTransfer = Math.min(startDemand, startBattery);
+    // Duration in sim-seconds so that rate is exactly 1C (bounded by available demand/battery)
+    const chargeDuration = maxTransfer / CHARGE_RATE_KWH_PER_SEC;
     const prog = { p: 0 };
     // 2) Charging: battery transfer
     mainTl.to(prog, {
@@ -1817,7 +1894,14 @@ class ChargingRobot {
       duration: chargeDuration,
       ease: "none",
       onStart: () => {
-        if (vehicle.chargingStartedAt == null) vehicle.chargingStartedAt = getSimTime();
+        if (vehicle.chargingStartedAt == null) {
+          vehicle.chargingStartedAt = getSimTime();
+          const order = orderManager.orders.find(o => o.id === vehicle.orderId);
+          if (order && order.createdAtSimTime != null) {
+            order.recordedWaitTimeSec = vehicle.chargingStartedAt - order.createdAtSimTime;
+            order.recordedDemandKwh = vehicle.chargeDemandKwh ?? null;
+          }
+        }
       },
       onUpdate: () => {
         const transferred = maxTransfer * prog.p;
@@ -2424,20 +2508,16 @@ const _prot = -Math.PI / 2;
 
 // 停车线贴图（透明底白线）做旧效果
 texLoader.load(
-  '/textures/parking_lines_white.png',
+  '/textures/parking_lines_white_.png',
   (map) => {
     map.colorSpace = THREE.SRGBColorSpace;
     const geo2 = _pgeo();
-    const mat2 = new THREE.MeshStandardMaterial({
+    const mat2 = new THREE.MeshBasicMaterial({
       map,
-      color: 0xc8c4b0,              // 做旧：偏灰黄，不刺眼
-      roughness: 0.65,
-      metalness: 0.0,
-      emissive: new THREE.Color(0xb8b4a0),
-      emissiveIntensity: 0.08,       // 很弱，避免崭新感
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.88,                 // 略褪色
-      alphaTest: 0.08,
+      opacity: 1,
+      alphaTest: 0.15,               // 只显示白线，透明区域不绘制（无黑色/灰色底）
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
@@ -2456,18 +2536,19 @@ texLoader.load(
 
 // === Load Background Building (Treasure Island) ===
 loader.load(
-  '/Treasure_Island_3.glb',
+  // '/Treasure_Island_3.glb',
+  'Treasure_Island_Parking_Lot_resize.glb',
   (gltf) => {
     const bg = gltf.scene;
-    bg.scale.set(50, 50, 50);
-    bg.position.set(-1, 8.05, -42);
-    bg.rotation.x = -Math.PI / 60;
+    bg.scale.set(0.27, 0.27, 0.27);
+    bg.position.set(-2, -1.1, -21);
+    bg.rotation.x = - 2.35332 * Math.PI / 180;
     bg.traverse((obj) => {
       if (obj.isMesh) {
         obj.receiveShadow = true;
         obj.castShadow = true;
         if (obj.material && (obj.material.isMeshStandardMaterial || obj.material.isMeshPhysicalMaterial)) {
-          obj.material.color.setHex(0xe2e0dc);
+          obj.material.color.setHex(0xb0aeaa);
           obj.material.roughness = Math.min(1, (obj.material.roughness ?? 0.5) + 0.2);
           if (obj.material.roughnessMap) obj.material.roughnessMap = null;
         }
@@ -2480,10 +2561,10 @@ loader.load(
   (err) => console.error('❌ Treasure Island load error:', err)
 );
 
-// === Load Battery Station Models at Robot Home Spots (1 and 14) ===
-const spot1 = PARKING_SPOTS.find((s) => s.index === 1);
-const spot14 = PARKING_SPOTS.find((s) => s.index === 14);
-const batteryStationSpots = [spot1, spot14];
+// === Load Battery Station Models at Robot Home Spots (2 and 13) ===
+const spot2 = PARKING_SPOTS.find((s) => s.index === 2);
+const spot13 = PARKING_SPOTS.find((s) => s.index === 13);
+const batteryStationSpots = [spot2, spot13];
 
 // Load battery station models
 batteryStationSpots.forEach((spot, idx) => {
@@ -2512,8 +2593,8 @@ batteryStationSpots.forEach((spot, idx) => {
 });
 
 // === Load Charging Robots (Small Caddie) ===
-// 小机器人初始位置：1、14 车位中心（与充电站位置相同）
-const robotHomeSpots = [spot1, spot14];
+// 小机器人初始位置：2、13 车位中心（与充电站位置相同）；1、14 禁止停车
+const robotHomeSpots = [spot2, spot13];
 const robotPositions = robotHomeSpots.map((s) => {
   const ci = getChargePointPosition(s.index);
   return {
@@ -2577,7 +2658,7 @@ robotPositions.forEach((pos, idx) => {
               
               // Only set fallback if material has no color/texture data
               if (!material.map && (!material.color || (material.color.r === 0 && material.color.g === 0 && material.color.b === 0))) {
-                material.color = new THREE.Color(0xcccccc);
+                material.color = new THREE.Color(0x999999);
                 console.log(`⚠️ Small caddie material has no color data, using light gray fallback`);
               }
               
@@ -2585,8 +2666,8 @@ robotPositions.forEach((pos, idx) => {
               if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
                 if (material.envMapIntensity !== undefined) material.envMapIntensity = 0.3;
                 if (material.roughness !== undefined) material.roughness = Math.min(1, (material.roughness ?? 0.5) + 0.1);
-                if (material.color) material.color.multiplyScalar(1.05);  // 提亮基础色
-                material.emissive = material.emissive || new THREE.Color(0x888888);
+                if (material.color) material.color.multiplyScalar(0.92);  // 略压暗，避免过白
+                material.emissive = material.emissive || new THREE.Color(0x666666);
                 material.emissiveIntensity = (material.emissiveIntensity ?? 0) + 0.0;
               }
               material.needsUpdate = true;
@@ -2594,7 +2675,7 @@ robotPositions.forEach((pos, idx) => {
           } else {
             // Create default material only if completely missing
             obj.material = new THREE.MeshStandardMaterial({
-              color: 0xcccccc,
+              color: 0x999999,
               metalness: 0.5,
               roughness: 0.1,
               envMapIntensity: 0.3
@@ -2679,6 +2760,70 @@ const parkingSpots = PARKING_SPOTS.map(spot => ({
 
 // Track which parking spots are occupied (保持兼容性)
 const occupiedSpots = new Set();
+
+// === Order / demand settings (configurable from dashboard) ===
+const ORDER_SETTINGS = {
+  ordersPerHour: 100,   // default 100 orders / hour
+  avgDemandKwh: 20,     // default 20 kWh per vehicle
+  demandStdKwh: 5,      // default std dev for Gaussian demand
+};
+
+// === Charge/discharge settings (configurable from dashboard) ===
+const CHARGE_SETTINGS = {
+  cRate: 10,            // default 10C
+  robotBatteryKwh: 100, // default 100 kWh
+};
+
+// Sample Gaussian (normal) distributed demand using Box-Muller.
+function sampleDemandKwh() {
+  const mean = ORDER_SETTINGS.avgDemandKwh;
+  const std = ORDER_SETTINGS.demandStdKwh;
+  let u1 = Math.random();
+  let u2 = Math.random();
+  u1 = u1 === 0 ? 1e-6 : u1;
+  const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+  const val = mean + std * z0;
+  return Math.max(0, val);
+}
+
+// Expose order settings to dashboard (SettingsPanel) so user can change orders/hour and avg demand.
+if (typeof window !== 'undefined') {
+  window.__setOrderSettings = (opts) => {
+    if (!opts) return;
+    if (typeof opts.ordersPerHour === 'number' && opts.ordersPerHour > 0) {
+      ORDER_SETTINGS.ordersPerHour = opts.ordersPerHour;
+    }
+    if (typeof opts.avgDemandKwh === 'number' && opts.avgDemandKwh > 0) {
+      ORDER_SETTINGS.avgDemandKwh = opts.avgDemandKwh;
+    }
+    if (typeof opts.demandStdKwh === 'number' && opts.demandStdKwh > 0) {
+      ORDER_SETTINGS.demandStdKwh = opts.demandStdKwh;
+    } else {
+      // keep std roughly tied to mean when only mean is provided
+      ORDER_SETTINGS.demandStdKwh = Math.max(1, ORDER_SETTINGS.avgDemandKwh * 0.25);
+    }
+  };
+
+  window.__setChargeSettings = (opts) => {
+    if (!opts) return;
+    const prevCap = ROBOT_BATTERY_KWH;
+    if (typeof opts.robotBatteryKwh === 'number' && opts.robotBatteryKwh > 0) {
+      CHARGE_SETTINGS.robotBatteryKwh = opts.robotBatteryKwh;
+      ROBOT_BATTERY_KWH = opts.robotBatteryKwh;
+      LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25;
+      // Scale existing robot battery levels proportionally to new capacity
+      if (prevCap > 0) {
+        const scale = ROBOT_BATTERY_KWH / prevCap;
+        chargingRobots.forEach((r) => {
+          r.batteryLevel = Math.min(ROBOT_BATTERY_KWH, r.batteryLevel * scale);
+        });
+      }
+    }
+    if (typeof opts.cRate === 'number' && opts.cRate > 0) {
+      CHARGE_SETTINGS.cRate = opts.cRate;
+    }
+  };
+}
 
 // === Initialize Order Manager ===
 const robotInitialPositions = robotPositions.map((p) => ({ x: p.x, y: p.y, z: p.z }));
@@ -2904,10 +3049,6 @@ function visualizeGraphStructures() {
       const spotIdx = n.spotIndex ?? '';
       const name = spotIdx ? `R:MP${spotIdx}` : `R:${n.id}`;
       addGraphLabel(name, n.x, y, n.z, 'robot_charge');
-    } else if (n.type === 'charge') {
-      const spotIdx = n.spotIndex ?? '';
-      const name = spotIdx ? `C${spotIdx}` : `C:${n.id}`;
-      addGraphLabel(name, n.x, y, n.z, 'robot_charge');
     } else if (n.type === 'charge0') {
       const spotIdx = n.spotIndex ?? '';
       const name = spotIdx ? `C${spotIdx}_0` : `C:${n.id}`;
@@ -2947,22 +3088,6 @@ function visualizeGraphStructures() {
   );
 }
 
-// === Visualize Charge Points (Ci) ===
-function visualizeChargePoints() {
-  const markerGeom = new THREE.CylinderGeometry(0.35, 0.35, 0.04, 24);
-  const markerMat = new THREE.MeshBasicMaterial({ color: 0xff9800 });
-  parkingSpots.forEach((spot) => {
-    const ci = getChargePointPosition(spot.index);
-    if (!ci) return;
-    const marker = new THREE.Mesh(markerGeom, markerMat);
-    marker.position.set(ci.x, 0.02, ci.z);
-    marker.rotation.x = 0;
-    marker.rotation.z = 0;
-    scene.add(marker);
-  });
-  console.log(`✅ Visualized ${parkingSpots.length} charge points on map`);
-}
-
 // === Load Vehicles with Order System ===
 function createVehicleSequence() {
   let vehicleCounter = 0;
@@ -2975,7 +3100,7 @@ function createVehicleSequence() {
       setTimeout(() => spawnVehicleFromOrder(), 5000);
       return;
     }
-    
+    order.createdAtSimTime = getSimTime(); // 下单时刻（仿真时间），用于计算 wait = 下单到开始充电
     vehicleCounter++;
     const selectedSpot = order.parkingSpot;
     const parkingSpotIndex = selectedSpot.index - 1; // 转换为0-based索引（用于兼容性）
@@ -3002,9 +3127,16 @@ function createVehicleSequence() {
 
         // Use gltf.scene directly (do not clone) so AnimationClips work (they reference object UUIDs)
         const carMesh = gltf.scene;
+        // 把模型原点移到车体中心：用包围盒计算几何中心，mesh 偏移使 Group 原点在 XZ 中心、车底在场景 y=0 接地
+        const VEHICLE_REF_Y = 0.825; // car.position.y，车体参考点高度；地面 y=0，车底应对齐 0
+        const box = new THREE.Box3().setFromObject(carMesh);
+        const center = box.getCenter(new THREE.Vector3());
+        const meshOffset = calibrate_vehicle
+          ? vehicleOffsetCalibrate
+          : { x: -center.x, y: -box.min.y - VEHICLE_REF_Y, z: -center.z }; // 车底局部 y = -VEHICLE_REF_Y → 世界 y = 0
+        carMesh.position.set(meshOffset.x, meshOffset.y, meshOffset.z);
         const car = new THREE.Group();
         car.add(carMesh);
-        carMesh.position.set(3, -1., 0.5);
         car.scale.set(0.9, 0.9, 0.9);
         car.position.set(graphEntrance.x, 0.825, graphEntrance.z);
         // 往 -y(-Z) 方向看，再逆时针旋转 90°
@@ -3035,7 +3167,8 @@ function createVehicleSequence() {
           id: vehicleCounter,
           orderId: order.id,
           needsCharging: true,
-          chargeDemandKwh: 10 + Math.random() * 10,
+          // Vehicle initial energy demand follows Gaussian distribution around avgDemandKwh
+          chargeDemandKwh: sampleDemandKwh(),
           slotGroup: getSlotGroup(selectedSpot.index),
           phase: 'entering',
           chargeportMixer: vehicleMixer,
@@ -3149,14 +3282,16 @@ function createVehicleSequence() {
         };
         tryStartEnter();
 
-        // After charging, vehicle leaves
+        // After charging, vehicle leaves. Invoked by: (1) initial setTimeoutSim(..., 10) after park,
+        // (2) charge callback via requestLeaveCheck() when robot finishes (with 0 sim-sec defer).
         const checkAndLeave = () => {
           if (vehicle.phase === 'leaving') return; // already in leave timeline, avoid starting a second one (would jump car back to spot)
           if (!vehicle.needsCharging) {
             const chargePt = selectedSpot.chargePoint ? { x: selectedSpot.chargePoint.x, z: selectedSpot.chargePoint.z } : null;
             if (isVehicleInReverseSafetyZone(vehicles, selectedSpot.index, vehicle.id, getVehicleNodePos) ||
                 isRobotInReverseSafetyZone(chargingRobots, selectedSpot.index, targetParkingSpot, chargePt)) {
-              setTimeout(checkAndLeave, 300);
+              // Retry after 0.3 sim-seconds
+              setTimeoutSim(checkAndLeave, 0.3);
               return;
             }
             const VEHICLE_SPEED = 4.0;
@@ -3199,7 +3334,7 @@ function createVehicleSequence() {
 
             const t0 = getSimTime() + 0.8;
             if (isPathBlocked(denseExit, VEHICLE_SPEED, t0, agentId)) {
-              setTimeout(checkAndLeave, 300);
+              setTimeoutSim(checkAndLeave, 0.3);
               return;
             }
 
@@ -3217,9 +3352,7 @@ function createVehicleSequence() {
                 const index = vehicles.indexOf(vehicle);
                 if (index > -1) vehicles.splice(index, 1);
                 occupiedSpots.delete(parkingSpotIndex);
-                if (vehicle.orderId) {
-                  orderManager.completeOrder(vehicle.orderId);
-                }
+                // Order already completed when charging finished (startRobotChargeMission callback)
                 collisionAvoidance.removeOccupiedPosition(`vehicle_${vehicleCounter}`);
                 releaseAgent(`vehicle_${vehicleCounter}`);
                 console.log(`🚗 Vehicle ${vehicleCounter} left, spot ${selectedSpot.index} is now available`);
@@ -3255,12 +3388,14 @@ function createVehicleSequence() {
             }
             leaveTl.to(car.position, { y: -1, duration: 0.5, ease: "power1.inOut" });
           } else {
-            setTimeout(checkAndLeave, 2000);
+            // Vehicle still needs charging; re-check after 2 sim-seconds
+            setTimeoutSim(checkAndLeave, 2);
           }
         };
         
         vehicle.requestLeaveCheck = checkAndLeave;
-        setTimeout(checkAndLeave, 10000);
+        // Initial leave check after 10 sim-seconds from parking
+        setTimeoutSim(checkAndLeave, 10);
       },
       undefined,
       (err) => console.error(`❌ Vehicle ${vehicleCounter} load error:`, err)
@@ -3269,7 +3404,16 @@ function createVehicleSequence() {
 
   // Spawn vehicles periodically using order system
   function scheduleNextOrder() {
-    const delay = 10000 + Math.random() * 5000; // 10-15秒随机延迟
+    const rate = ORDER_SETTINGS.ordersPerHour;
+    if (!rate || rate <= 0) return;
+    // Mean interval in SIM TIME (seconds) for given orders/hour (e.g. 60 ⇒ 1 min per order)
+    const meanIntervalSimSec = 3600 / rate;
+    const jitterFactor = 0.5 + Math.random(); // [0.5, 1.5] to avoid strict periodicity
+    const intervalSimSec = Math.max(1, meanIntervalSimSec * jitterFactor);
+    // Convert sim-time interval to real-time delay using current sim speed
+    const simScale = Math.max(0.1, getSimTimeScale());
+    const intervalRealSec = intervalSimSec / simScale;
+    const delay = intervalRealSec * 1000;
     setTimeout(() => {
       if (vehicles.length < 10) { // Limit concurrent vehicles
         spawnVehicleFromOrder();
@@ -3698,7 +3842,14 @@ function startRobotChargeMission(robot, vehicle) {
     // mission finished: mark vehicle done
     vehicle.needsCharging = false;
     vehicle.assignedRobotId = null;
-    if (typeof vehicle.requestLeaveCheck === 'function') vehicle.requestLeaveCheck();
+    // Mark order as completed as soon as charging mission finishes (independent of when vehicle leaves lot)
+    if (vehicle.orderId) {
+      orderManager.completeOrder(vehicle.orderId);
+    }
+    // Defer leave check so robot's releaseAgent/reservation updates are visible; then try to start leave
+    if (typeof vehicle.requestLeaveCheck === 'function') {
+      setTimeoutSim(() => vehicle.requestLeaveCheck(), 0);
+    }
 
     // Immediately dispatch next order if any; otherwise go rest/home
     const next = findNextWaitingVehicle(vehicle.id);
@@ -3762,7 +3913,8 @@ function assignRobotToVehicle(vehicle) {
 
   if (!availableRobot) {
     console.log('⚠️ No available robots, vehicle will wait... Retrying in 2 seconds...');
-    setTimeout(() => assignRobotToVehicle(vehicle), 2000);
+    // Retry after 2 sim-seconds
+    setTimeoutSim(() => assignRobotToVehicle(vehicle), 2);
     return;
   }
 
@@ -3834,7 +3986,15 @@ function animate() {
   const delta = (now - lastTime) / 1000;
   lastTime = now;
 
-  const LABEL_Y_OFFSET = 5 ;
+  const LABEL_Y_OFFSET = 10; // same height as model (no offset)
+
+   // Update sim time overlay (hh:mm:ss), reflects accelerated sim time
+   const simT = getSimTime();
+   const hours = Math.floor(simT / 3600);
+   const minutes = Math.floor((simT % 3600) / 60);
+   const seconds = Math.floor(simT % 60);
+   const pad = (n) => String(n).padStart(2, '0');
+   simTimeEl.textContent = `Sim time  ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 
   // Clean up trajectories for vehicles that have left the lot (removed from vehicles)
   const activeIds = new Set(vehicles.map(v => v.id));
@@ -3843,6 +4003,29 @@ function animate() {
       if (rec.line) trajectoryGroup.remove(rec.line);
       vehicleTrajectories.delete(vid);
     }
+  }
+  // Vehicle offset calibration: show logical-position marker and apply live offset to first vehicle
+  if (calibrate_vehicle && vehicles.length > 0) {
+    ensureCalibrationUI();
+    if (!calibrationMarker) {
+      calibrationMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.25, 16, 12),
+        new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.9 })
+      );
+      calibrationMarker.name = 'calibration_vehicle_marker';
+      scene.add(calibrationMarker);
+    }
+    const car = vehicles[0].model;
+    if (car && car.position) {
+      calibrationMarker.position.copy(car.position);
+      calibrationMarker.position.y = car.position.y + 0.5;
+      calibrationMarker.visible = true;
+      if (car.children.length > 0) {
+        car.children[0].position.set(vehicleOffsetCalibrate.x, vehicleOffsetCalibrate.y, vehicleOffsetCalibrate.z);
+      }
+    }
+  } else if (calibrationMarker) {
+    calibrationMarker.visible = false;
   }
   // Record and draw vehicle trajectories when entering or leaving
   vehicles.forEach(vehicle => {
@@ -3892,23 +4075,17 @@ function animate() {
       );
     }
     if (vehicle.demandLabel && vehicle.model && vehicle.model.position) {
-      const p = vehicle.model.position;
-      const s = worldToScreen(p.x, p.y + LABEL_Y_OFFSET, p.z);
-      vehicle.demandLabel.style.display = s.behind ? 'none' : 'block';
-      vehicle.demandLabel.style.left = s.x + 'px';
-      vehicle.demandLabel.style.top = s.y + 'px';
-      const d = (vehicle.chargeDemandKwh ?? 0);
-      const pct = Math.min(100, Math.round((d / VEHICLE_BATTERY_KWH) * 100));
-      vehicle.demandLabel.textContent = `${pct}%`;
-      vehicle.demandLabel.style.color = pct <= 20 ? '#22c55e' : '#ef4444';
+      vehicle.demandLabel.style.display = 'none'; // 暂时移除 SOC% 显示
     }
   });
   
+  const simDt = delta * getSimTimeScale();
+
   vehicles.forEach(vehicle => {
-    if (vehicle.chargeportMixer) vehicle.chargeportMixer.update(delta);
+    if (vehicle.chargeportMixer) vehicle.chargeportMixer.update(simDt);
   });
   chargingRobots.forEach(robot => {
-    if (robot.model?.userData?.mixer) robot.model.userData.mixer.update(delta);
+    if (robot.model?.userData?.mixer) robot.model.userData.mixer.update(simDt);
     if (robot.model && robot.model.position) {
       collisionAvoidance.addOccupiedPosition(
         { x: robot.model.position.x, z: robot.model.position.z },
@@ -3917,20 +4094,18 @@ function animate() {
       );
     }
     if (robot.batteryLabel && robot.model && robot.model.position) {
-      const p = robot.model.position;
-      const s = worldToScreen(p.x, p.y + LABEL_Y_OFFSET, p.z);
-      robot.batteryLabel.style.display = s.behind ? 'none' : 'block';
-      robot.batteryLabel.style.left = s.x + 'px';
-      robot.batteryLabel.style.top = s.y + 'px';
-      const bpct = Math.min(100, Math.round((robot.batteryLevel / ROBOT_BATTERY_KWH) * 100));
-      robot.batteryLabel.textContent = `${bpct}%`;
-      robot.batteryLabel.style.color = bpct > 40 ? '#22c55e' : '#ef4444';
+      robot.batteryLabel.style.display = 'none'; // 暂时移除 SOC% 显示
     }
     if (robot.state === 'idle' && robot.atHome && robot.homePosition) {
       const dx = robot.model.position.x - robot.homePosition.x;
       const dz = robot.model.position.z - robot.homePosition.z;
       if (dx * dx + dz * dz < 2.5 * 2.5) {
-        robot.batteryLevel = Math.min(ROBOT_BATTERY_KWH, robot.batteryLevel + 0.15);
+        // Self-charging at home: same C-rate relative to ROBOT_BATTERY_KWH (full in 1/C sim hours)
+        const rateKwhPerSec = (CHARGE_SETTINGS.cRate * ROBOT_BATTERY_KWH) / 3600;
+        robot.batteryLevel = Math.min(
+          ROBOT_BATTERY_KWH,
+          robot.batteryLevel + rateKwhPerSec * simDt
+        );
       }
     }
     // Check if robot should return home to charge
@@ -3980,16 +4155,6 @@ function animate() {
   }
   controls.update();
 
-  // Weather: animate rain
-  const posAttr = rainPoints.geometry.attributes.position;
-  for (let i = 0; i < RAIN_COUNT; i++) {
-    let y = posAttr.getY(i);
-    y -= RAIN_SPEED * delta;
-    if (y < rainBounds.yMin) y = rainBounds.yMax;
-    posAttr.setY(i, y);
-  }
-  posAttr.needsUpdate = true;
-
   // Push state to dashboard when embedded (?dashboard=1)
   if (typeof window.__dashboardSetState === 'function') {
     dashboardTick++;
@@ -3999,11 +4164,28 @@ function animate() {
       const vehiclesBeingCharged = new Set(chargingRobots.filter(r => r.state === 'charging' && r.targetVehicle).map(r => r.targetVehicle.id));
       const waiting = vehicles.filter(v => v.phase === 'parked' && v.needsCharging && !vehiclesBeingCharged.has(v.id)).length;
       const charging = vehiclesBeingCharged.size;
-      const withWaitTime = vehicles.filter(v => v.parkedAt != null && v.chargingStartedAt != null);
-      const avgWaitSec = withWaitTime.length
-        ? withWaitTime.reduce((s, v) => s + (v.chargingStartedAt - v.parkedAt), 0) / withWaitTime.length
-        : 0;
+      const orderDetails = orders.map(o => {
+        const v = vehicles.find(v => v.orderId === o.id) || null;
+        const waitTimeSec = o.recordedWaitTimeSec ?? (v && v.chargingStartedAt != null && o.createdAtSimTime != null
+          ? v.chargingStartedAt - o.createdAtSimTime
+          : null);
+        return {
+          orderId: o.id,
+          vehicleId: v ? v.id : null,
+          spotIndex: o.parkingSpot?.index ?? null,
+          side: o.parkingSpot?.side ?? null,
+          orderStatus: o.status,
+          vehiclePhase: v ? v.phase : null,
+          needsCharging: v ? v.needsCharging : null,
+          demandKwh: v ? (v.chargeDemandKwh ?? null) : (o.recordedDemandKwh ?? null),
+          waitTimeSec,
+        };
+      });
+      const waitValues = orderDetails.map(o => o.waitTimeSec).filter(w => w != null && !Number.isNaN(w));
+      const avgWaitSec = waitValues.length ? waitValues.reduce((s, w) => s + w, 0) / waitValues.length : 0;
+      const simTimeSec = getSimTime();
       window.__dashboardSetState({
+        simTimeSec,
         fleetSummary: {
           total: chargingRobots.length,
           active: chargingRobots.filter(r => r.state === 'navigating' || r.state === 'charging').length,
@@ -4028,6 +4210,7 @@ function animate() {
           avgWaitTimeSec: Math.round(avgWaitSec),
         },
         totalKwhDelivered: totalKwhDelivered,
+      orderDetails,
       });
     }
   }
@@ -4053,8 +4236,10 @@ function applySimulatorResize() {
   renderer.setSize(wScale, hScale, false);
   composer.setSize(wScale, hScale);
   composer.setPixelRatio(renderer.getPixelRatio());
+  const ssaoPassResize = composer.passes[1];
+  if (ssaoPassResize && ssaoPassResize.setSize) ssaoPassResize.setSize(wScale, hScale);
   bloomPass.resolution.set(wScale, hScale);
-  const fxaaPass = composer.passes[2];
+  const fxaaPass = composer.passes[3];
   if (fxaaPass && fxaaPass.setSize) fxaaPass.setSize(wScale, hScale);
   renderer.domElement.style.width = w + 'px';
   renderer.domElement.style.height = h + 'px';

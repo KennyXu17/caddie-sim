@@ -61,21 +61,24 @@ export function getVehicleLaneGraphData() {
   addNode({ id: KP.TURN_1_24_ENTRY.id, x: KP.TURN_1_24_ENTRY.x, z: KP.TURN_1_24_ENTRY.z, type: 'kp' });
   addNode({ id: KP.TURN_1_24_EXIT.id, x: KP.TURN_1_24_EXIT.x, z: KP.TURN_1_24_EXIT.z, type: 'kp' });
 
+  // 车道 z 由两侧 Cxx_0 的 z 平均值决定（与 KP 一致）
+  const laneZ_1_24 = KP.TURN_1_24_ENTRY.z;
+  const laneZ_25_44 = KP.TURN_25_44_ENTRY.z;
+
   // Conflict points on upper lane (these are conceptually robot conflict points, but used in vehicle lane graph)
-  const CF_25_44_LEFT = { id: 'cf_25_44_left', x: -20.5, z: -6.5, type: 'conflict' };
-  const CF_25_44_RIGHT = { id: 'cf_25_44_right', x: 18.5, z: -6.5, type: 'conflict' };
+  const CF_25_44_LEFT = { id: 'cf_25_44_left', x: -20.5, z: laneZ_25_44, type: 'conflict' };
+  const CF_25_44_RIGHT = { id: 'cf_25_44_right', x: 18.5, z: laneZ_25_44, type: 'conflict' };
   addNode(CF_25_44_LEFT);
   addNode(CF_25_44_RIGHT);
 
-  // Slot turn nodes (grouped by shared lane point)
-  // Lower lane moved -0.5 from -22.5 to -23.0
+  // Slot turn nodes (grouped by shared lane point)，z 与车道一致
   const lowerLaneGroups = buildSlotTurnGroupsForLane(
     Array.from({ length: 24 }, (_, k) => k + 1),
-    -23.0
+    laneZ_1_24
   );
   const upperLaneGroups = buildSlotTurnGroupsForLane(
     Array.from({ length: 20 }, (_, k) => k + 25),
-    -6.5
+    laneZ_25_44
   );
 
   for (const g of lowerLaneGroups) {
@@ -144,6 +147,18 @@ export function getVehicleLaneGraphData() {
   // Upper lane branch: turn_25_44_entry -> cf_left -> slot chain -> cf_right -> turn_25_44_exit
   const upperPath = [KP.TURN_25_44_ENTRY.id, CF_25_44_LEFT.id, ...upperIds, CF_25_44_RIGHT.id, KP.TURN_25_44_EXIT.id];
   pathWithTurnEndpoints(upperPath);
+
+  // 整条线 turn_entry->...->turn_exit 上所有点的 z 统一为两侧 Cxx_0 的 z 平均值
+  const lowerIdSet = new Set([KP.TURN_1_24_ENTRY.id, KP.TURN_1_24_EXIT.id, ...lowerIds]);
+  const upperIdSet = new Set([KP.TURN_25_44_ENTRY.id, KP.TURN_25_44_EXIT.id, CF_25_44_LEFT.id, CF_25_44_RIGHT.id, ...upperIds]);
+  for (const n of nodes) {
+    if (lowerIdSet.has(n.id)) n.z = laneZ_1_24;
+    else if (upperIdSet.has(n.id)) n.z = laneZ_25_44;
+    else if (n.type === 'turn_endpoint' && n.meta?.turnId) {
+      if (n.meta.turnId === 'turn_1_24_entry' || n.meta.turnId === 'turn_1_24_exit') n.z = laneZ_1_24;
+      else if (n.meta.turnId === 'turn_25_44_entry' || n.meta.turnId === 'turn_25_44_exit' || n.meta.turnId === 'cf_25_44_left' || n.meta.turnId === 'cf_25_44_right') n.z = laneZ_25_44;
+    }
+  }
 
   // S_xx <-> V:slot_xx_yy: bidirectional edge (enter: lane→spot, exit: spot→lane). R:MP only for conflict.
   const addBiEdge = (aId, bId) => {

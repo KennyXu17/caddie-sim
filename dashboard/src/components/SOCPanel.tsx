@@ -17,11 +17,11 @@ function socColor(soc: number) {
 
 function stateLabel(state: string) {
   const labels: Record<string, string> = {
-    idle: '空闲',
-    navigating: '导航中',
-    charging: '充电中',
-    selfCharging: '自充电',
-    returning: '返回中',
+    idle: 'Idle',
+    navigating: 'Navigating',
+    charging: 'Charging',
+    selfCharging: 'Self charging',
+    returning: 'Returning',
   };
   return labels[state] ?? state;
 }
@@ -42,7 +42,7 @@ export function SOCPanel({ robots: robotsProp }: { robots?: RobotStatus[] | null
     <Card variant="outlined" sx={{ maxHeight: 320, display: 'flex', flexDirection: 'column', bgcolor: 'background.paper' }}>
       <CardContent sx={{ py: 1, px: 1.5, overflow: 'auto', flex: 1, minHeight: 0 }}>
         <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600, fontSize: '0.7rem' }}>
-          Robot Status <Typography component="span" variant="caption" sx={{ ml: 0.5, opacity: 0.8 }}>(Click ID to follow)</Typography>
+          Robot Status
         </Typography>
         <Box sx={{ mt: 0.75, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           {robots.map((r) => {

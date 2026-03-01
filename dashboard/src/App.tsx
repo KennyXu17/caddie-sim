@@ -100,7 +100,7 @@ export default function App() {
               bgcolor: 'background.paper',
             }}
           >
-            <FleetStatusCards fleetSummary={simState?.fleetSummary} />
+            <FleetStatusCards orderDetails={simState?.orderDetails} />
           </Paper>
 
           <Paper
@@ -147,7 +147,12 @@ export default function App() {
               bgcolor: 'background.paper',
             }}
           >
-            <OrderStatsPanel orderStats={simState?.orderStats} totalKwhDelivered={simState?.totalKwhDelivered} />
+            <OrderStatsPanel
+              orderStats={simState?.orderStats}
+              totalKwhDelivered={simState?.totalKwhDelivered}
+              simTimeSec={simState?.simTimeSec}
+              orderDetails={simState?.orderDetails}
+            />
           </Paper>
         </Box>
       </Box>

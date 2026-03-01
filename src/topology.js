@@ -20,10 +20,20 @@ const TURN0_RIGHT_X = 18.5;
 const ROW_Z = { 1: -25, 2: -20.5, 3: -8.5, 4: -4 };
 /** 每行 R:MPi、R:turn 整体往 Si->Ci 的 z 轴方向移动量 */
 const ROW_Z_OFFSET = { 1: 0.5, 2: -0.5, 3: 0.5, 4: -0.5 };
-// 车辆主干道中心线（用于 conflict points：机器人与车辆可能冲突的路口点）
-// - row1(1-14) 与 row2(15-24) 之间的主干道：z = -23.0 (moved -0.5 from -22.5)
-// - row3(25-34) 与 row4(35-44) 之间的主干道：z = -6.5
-const VEHICLE_LANE_Z = { '1_14': -23.0, '25_44': -6.5 };
+// 车辆主干道中心线 z：由两侧 Cxx_0 的 z 平均值决定（与 V:turn_xx_entry->...->exit 一致）
+function getLaneZFromCxx0(slotGroup) {
+  const z = (i) => PARKING_SPOTS.find((s) => s.index === i)?.chargePoint?.z ?? null;
+  if (slotGroup === '1_24') {
+    const a = z(1), b = z(15);
+    return (a != null && b != null) ? (a + b) / 2 : -23.0;
+  }
+  if (slotGroup === '25_44') {
+    const a = z(25), b = z(35);
+    return (a != null && b != null) ? (a + b) / 2 : -6.5;
+  }
+  return -23.0;
+}
+const VEHICLE_LANE_Z = { '1_14': getLaneZFromCxx0('1_24'), '25_44': getLaneZFromCxx0('25_44') };
 /** 经过转向点的附加代价，用于减少途经 turn 数量 */
 const TURN_PENALTY = 1.5;
 
@@ -46,11 +56,28 @@ function getSpotSide(index) {
   return s ? s.side : 'right';
 }
 
-/** 同行 R:turn_i_left/right 的 z 坐标（R:MPxx 与 turn 对齐用） */
+/** Cxx_0 与 R:MPxx 的固定 z 向距离（米）：保证在 Cxx_0 充电的机器人不会挡住后方在 R:MP 通道移动的机器人 */
+const R_MP_Z_OFFSET_FROM_CXX0 = -1.2;
+
+/** 该行任一车位的 Cxx_0（与 Ci 同 z）的 z 坐标 */
+function getCxx0ZForRow(row) {
+  const firstIndex = row === 1 ? 1 : row === 2 ? 15 : row === 3 ? 25 : 35;
+  const spot = PARKING_SPOTS.find((s) => s.index === firstIndex);
+  return spot?.chargePoint?.z ?? (ROW_Z[row] + (ROW_Z_OFFSET[row] ?? 0) - (row === 4 || row === 2 ? 0.5 : 0));
+}
+
+/** 该行车位的开口方向：'+z' 车头朝 +z，'-z' 车头朝 -z；R:MP 通道在 Cxx_0 的「后方」 */
+function getOpeningForRow(row) {
+  const firstIndex = row === 1 ? 1 : row === 2 ? 15 : row === 3 ? 25 : 35;
+  const spot = PARKING_SPOTS.find((s) => s.index === firstIndex);
+  return spot?.opening ?? '+z';
+}
+
+/** 同行 R:turn 与 R:MPxx 的 z：Cxx_0.z ± 固定偏移。开口 +z 时 R:MP 在 Cxx_0 的 -z 侧（后方），开口 -z 时在 +z 侧 */
 function getRowTurnZ(row) {
-  let z = ROW_Z[row] + (ROW_Z_OFFSET[row] ?? 0);
-  if (row === 4 || row === 2) z -= 0.5;
-  return z;
+  const cxx0Z = getCxx0ZForRow(row);
+  const opening = getOpeningForRow(row);
+  return opening === '+z' ? cxx0Z - R_MP_Z_OFFSET_FROM_CXX0 : cxx0Z + R_MP_Z_OFFSET_FROM_CXX0;
 }
 
 function turnId(row, side) {
@@ -79,15 +106,7 @@ function buildGraph() {
   const edges = [];
 
   for (const row of [1, 2, 3, 4]) {
-    let z = ROW_Z[row] + (ROW_Z_OFFSET[row] ?? 0);
-    // Row 4: turn_4_left/right should move -0.5 in z direction
-    if (row === 4) {
-      z -= 0.5;
-    }
-    // Row 2: turn_2_left/right should move -0.5 in z direction
-    if (row === 2) {
-      z -= 0.5;
-    }
+    const z = getRowTurnZ(row);
     for (const side of ['left', 'right']) {
       const x = side === 'left' ? LEFT_X : RIGHT_X;
       const id = turnId(row, side);
@@ -143,19 +162,7 @@ function buildGraph() {
       row,
       side
     });
-    // 充电点 Ci：由 S_i 确定，沿开口方向距离 2.7（与 parking_map 一致）
-    const cid = chargeId(spot.index);
-    nodes.set(cid, {
-      id: cid,
-      x: cp.x,
-      z: cp.z,
-      y: cp.y != null ? cp.y : 0,
-      type: 'charge',
-      spotIndex: spot.index,
-      row,
-      side
-    });
-    // Cxx_0：充电动画前靠近点，Ci 沿 x 方向 0.4 米（开口 -z 为 +x，开口 +z 为 -x）
+    // Cxx_0：充电动画前靠近点，由原 Ci 沿 x 方向 0.4 米（开口 -z 为 +x，开口 +z 为 -x）
     const APPROACH_DIST = 0.4;
     const approachDx = spot.opening === '-z' ? APPROACH_DIST : -APPROACH_DIST;
     const c0id = charge0Id(spot.index);
@@ -222,16 +229,7 @@ function buildGraph() {
   for (let i = 35; i <= 43; i++) addDirectedEdge(moveId(i), moveId(i + 1));
   addDirectedEdge(moveId(44), turnId(4, 'right'));
 
-  // R:MPi <-> Ci 双向连接（充电点，机器人充放电最终目的地）
-  for (let i = 1; i <= 44; i++) {
-    addBidirectionalEdge(moveId(i), chargeId(i));
-  }
-  // Ci <-> Cxx_0 双向连接（充电前靠近点）
-  for (let i = 1; i <= 44; i++) {
-    addBidirectionalEdge(chargeId(i), charge0Id(i));
-  }
-
-  // Cxx_0 与同排两侧 R:MP / R:turn 连接，如 turn_4_left->C35_0->MP36, MP35->C36_0->MP37
+  // Cxx_0 与同排两侧 R:MP / R:turn 连接（R:MPi 与 Cxx_0 之间无直连边），如 turn_4_left->C35_0->MP36, MP35->C36_0->MP37
   function rowNeighbors(spotIndex) {
     const row = getSpotRow(spotIndex);
     if (row === 1) {
@@ -634,4 +632,4 @@ export function getLeaveTargetFromCharge0(spotIndex) {
   return { positions: [pos], nextSpotIndex: spotIndexNext != null ? spotIndexNext : spotIndex };
 }
 
-export { ROW_Z, LEFT_X, RIGHT_X, getSpotRow, getSpotSide, charge0Id };
+export { getLaneZFromCxx0, R_MP_Z_OFFSET_FROM_CXX0, ROW_Z, LEFT_X, RIGHT_X, getSpotRow, getSpotSide, charge0Id };

@@ -1,4 +1,4 @@
-import type { RobotStatus, OrderStats, FleetSummary } from '../types';
+import type { RobotStatus, OrderStats, FleetSummary, OrderDetail } from '../types';
 
 export const fleetSummary: FleetSummary = {
   total: 12,
@@ -28,3 +28,28 @@ export const orderStats: OrderStats = {
   completed: 0,
   avgWaitTimeSec: 0,
 };
+
+export const orderDetails: OrderDetail[] = [
+  {
+    orderId: 1,
+    vehicleId: 1,
+    spotIndex: 5,
+    side: 'left',
+    orderStatus: 'in_progress',
+    vehiclePhase: 'parked',
+    needsCharging: true,
+    demandKwh: 18,
+    waitTimeSec: 120,
+  },
+  {
+    orderId: 2,
+    vehicleId: 2,
+    spotIndex: 22,
+    side: 'right',
+    orderStatus: 'completed',
+    vehiclePhase: 'leaving',
+    needsCharging: false,
+    demandKwh: 0,
+    waitTimeSec: 95,
+  },
+];

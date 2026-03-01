@@ -177,7 +177,8 @@ export function isVehicleInReverseSafetyZone(vehicles, slotIndex, excludeVehicle
   for (const v of vehicles) {
     if (v.id === excludeVehicleId) continue;
     if (!v.model || v.phase === 'gone') continue;
-    // 含 parked：该段车道及对应车位（如 S28,S29,S30）上有车则不能倒车
+    // Do not treat parked vehicles in other spots as obstacles; only moving/entering/leaving matter.
+    if (v.phase === 'parked') continue;
     const p = v.model.position;
     if (p.y < 0) continue;
     for (const q of vehiclePoints) {

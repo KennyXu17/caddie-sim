@@ -37,12 +37,12 @@ const SPOT_ROWS = [
   // Uniform groups (width=3 each):
   // 15-19,25-29,35-39: x in [-17.5, -2.5]
   // 20-24,30-34,40-44: x in [0.5, 15.5]
-  { indices: [15, 19], minX: -17.5, maxX: -2.5, minZ: -20.5, maxZ: -14.5, opening: '-z' },
-  { indices: [20, 24], minX: 0.5, maxX: 15.5, minZ: -20.5, maxZ: -14.5, opening: '-z' },
-  { indices: [25, 29], minX: -17.5, maxX: -2.5, minZ: -14.5, maxZ: -9, opening: '+z' },
-  { indices: [30, 34], minX: 0.5, maxX: 15.5, minZ: -14.5, maxZ: -9, opening: '+z' },
-  { indices: [35, 39], minX: -17.5, maxX: -2.5, minZ: -4, maxZ: 1.5, opening: '-z' },
-  { indices: [40, 44], minX: 0.5, maxX: 15.5, minZ: -4, maxZ: 1.5, opening: '-z' }
+  { indices: [15, 19], minX: -17.5, maxX: -2.5, minZ: -20.25, maxZ: -14.25, opening: '-z' },
+  { indices: [20, 24], minX: 0.5, maxX: 15.5, minZ: -20.25, maxZ: -14.25, opening: '-z' },
+  { indices: [25, 29], minX: -17.5, maxX: -2.5, minZ: -14.25, maxZ: -8.75, opening: '+z' },
+  { indices: [30, 34], minX: 0.5, maxX: 15.5, minZ: -14.25, maxZ: -8.75, opening: '+z' },
+  { indices: [35, 39], minX: -17.5, maxX: -2.5, minZ: -3.65, maxZ: 1.85, opening: '-z' },
+  { indices: [40, 44], minX: 0.5, maxX: 15.5, minZ: -3.65, maxZ: 1.85, opening: '-z' }
 ];
 
 /** 生成 44 个停车位：中心、AABB、门口中心(chargePoint) */

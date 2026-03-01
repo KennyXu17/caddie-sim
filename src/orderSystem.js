@@ -16,10 +16,10 @@ const PARKING_SPOTS = MAP_SPOTS.map((spot) => ({
 }));
 
 /** 机器人充电站车位：车辆禁止停入，仅供机器人休息/自充电 */
-const ROBOT_CHARGING_STATION_SPOTS = [1, 14];
+const ROBOT_CHARGING_STATION_SPOTS = [2, 13];
 
-/** 暂时禁止停车的车位（如施工/维护） */
-const DISABLED_PARKING_SPOTS = [2, 13];
+/** 禁止停车的车位（如 1、14 留空，与充电站 2、13 区分） */
+const DISABLED_PARKING_SPOTS = [1, 14];
 
 // === 订单管理器 ===
 class OrderManager {
@@ -28,7 +28,7 @@ class OrderManager {
     this.orderCounter = 0;
     this.occupiedSpots = new Set();
 
-    // 机器人充电站车位（1、14）永久占用，车辆禁止停入
+    // 机器人充电站车位（2、13）永久占用，车辆禁止停入
     ROBOT_CHARGING_STATION_SPOTS.forEach(idx => {
       this.occupiedSpots.add(idx);
     });
@@ -68,7 +68,7 @@ class OrderManager {
     return nearest;
   }
 
-  // 获取可用的停车位（排除机器人充电站 1、14 及暂时禁止的车位）
+  // 获取可用的停车位（排除机器人充电站 2、13 及禁止停车的 1、14）
   getAvailableSpots() {
     return PARKING_SPOTS.filter(
       spot => !this.occupiedSpots.has(spot.index) && !ROBOT_CHARGING_STATION_SPOTS.includes(spot.index) && !DISABLED_PARKING_SPOTS.includes(spot.index)

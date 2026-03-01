@@ -9,10 +9,12 @@ export interface RobotStatus {
 }
 
 export interface SimulatorState {
+  simTimeSec?: number;
   fleetSummary: FleetSummary;
   robots: RobotStatus[];
   orderStats: OrderStats;
   totalKwhDelivered?: number;
+  orderDetails?: OrderDetail[];
 }
 
 export interface OrderStats {
@@ -27,4 +29,16 @@ export interface FleetSummary {
   active: number;
   idle: number;
   charging: number;
+}
+
+export interface OrderDetail {
+  orderId: number;
+  vehicleId: number | null;
+  spotIndex: number;
+  side: 'left' | 'right';
+  orderStatus: string;
+  vehiclePhase?: string | null;
+  needsCharging?: boolean | null;
+  demandKwh?: number | null;
+  waitTimeSec?: number | null;
 }

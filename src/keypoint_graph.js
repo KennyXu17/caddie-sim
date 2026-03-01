@@ -9,6 +9,7 @@
 
 import { PARKING_SPOTS } from './orderSystem.js';
 import { ENTRANCE as MAP_ENTRANCE } from './parking_map.js';
+import { getLaneZFromCxx0 } from './topology.js';
 
 // =============================================================================
 // KEYPOINT DEFINITIONS (World Coordinates)
@@ -16,6 +17,9 @@ import { ENTRANCE as MAP_ENTRANCE } from './parking_map.js';
 // ENTRANCE/EXIT z must match parking_map for consistency; entrance at z=6.69 per LOT_BOUNDS
 const ENTRANCE_Z = MAP_ENTRANCE.z;
 const EXIT_Z = 6.5; // Exit aligned with lane turn level
+// 车道中心线 z 由两侧 Cxx_0 的 z 平均值决定
+const LANE_Z_25_44 = getLaneZFromCxx0('25_44');
+const LANE_Z_1_24 = getLaneZFromCxx0('1_24');
 
 export const KP = {
   /** Parking lot entrance (matches parking_map.ENTRANCE) */
@@ -24,23 +28,23 @@ export const KP = {
   /** Parking lot exit */
   EXIT: { id: 'exit', x: 20.25, z: EXIT_Z, type: 'exit' },
 
-  /** Slots 25-44 (upper row): lane at z = -6.5 */
-  TURN_25_44_ENTRY: { id: 'turn_25_44_entry', x: -22.25, z: -6.5, type: 'turn', slotGroup: '25_44' },
-  TURN_25_44_EXIT: { id: 'turn_25_44_exit', x: 20.25, z: -6.5, type: 'turn', slotGroup: '25_44' },
+  /** Slots 25-44 (upper row): lane z = avg(C25_0.z, C35_0.z) */
+  TURN_25_44_ENTRY: { id: 'turn_25_44_entry', x: -22.25, z: LANE_Z_25_44, type: 'turn', slotGroup: '25_44' },
+  TURN_25_44_EXIT: { id: 'turn_25_44_exit', x: 20.25, z: LANE_Z_25_44, type: 'turn', slotGroup: '25_44' },
 
-  /** Slots 1-24 (lower row): lane at z = -23.0 (moved -0.5 from -22.5) */
-  TURN_1_24_ENTRY: { id: 'turn_1_24_entry', x: -22.25, z: -23.0, type: 'turn', slotGroup: '1_24' },
-  TURN_1_24_EXIT: { id: 'turn_1_24_exit', x: 20.25, z: -23.0, type: 'turn', slotGroup: '1_24' }
+  /** Slots 1-24 (lower row): lane z = avg(C1_0.z, C15_0.z) */
+  TURN_1_24_ENTRY: { id: 'turn_1_24_entry', x: -22.25, z: LANE_Z_1_24, type: 'turn', slotGroup: '1_24' },
+  TURN_1_24_EXIT: { id: 'turn_1_24_exit', x: 20.25, z: LANE_Z_1_24, type: 'turn', slotGroup: '1_24' }
 };
 
-/** Lane segments: { start, end, slotGroup } - centerline along constant z */
+/** Lane segments: { start, end, slotGroup } - centerline along constant z (from Cxx_0 average) */
 export const LANES = [
   {
     id: 'lane_25_44',
     start: KP.TURN_25_44_ENTRY,
     end: KP.TURN_25_44_EXIT,
     slotGroup: '25_44',
-    z: -6.5,
+    z: LANE_Z_25_44,
     xMin: -22.25,
     xMax: 20.25
   },
@@ -49,7 +53,7 @@ export const LANES = [
     start: KP.TURN_1_24_ENTRY,
     end: KP.TURN_1_24_EXIT,
     slotGroup: '1_24',
-    z: -23.0, // Moved -0.5 from -22.5
+    z: LANE_Z_1_24,
     xMin: -22.25,
     xMax: 20.25
   }
@@ -99,7 +103,7 @@ function buildGraph() {
     ['25_44', new Set([KP.TURN_25_44_ENTRY.id, KP.TURN_25_44_EXIT.id])]
   ]);
 
-  const laneZByGroup = { '1_24': -23.0, '25_44': -6.5 }; // Lower lane moved -0.5 from -22.5
+  const laneZByGroup = { '1_24': LANE_Z_1_24, '25_44': LANE_Z_25_44 };
 
   for (const spot of PARKING_SPOTS) {
     const slotIndex = spot.index;
@@ -678,7 +682,7 @@ export function planEnterPath(slotIndex, slotCenter, stepM = 0.5) {
   if (!group) return [];
 
   const entryTurn = group === '25_44' ? KP.TURN_25_44_ENTRY : KP.TURN_1_24_ENTRY;
-  const laneZ = group === '25_44' ? -6.5 : -23.0; // Lower lane moved -0.5
+  const laneZ = group === '25_44' ? LANE_Z_25_44 : LANE_Z_1_24;
   const laneEndAtSlot = { x: slotCenter.x, z: laneZ };
 
   const path = [KP.ENTRANCE, entryTurn, laneEndAtSlot];
@@ -698,7 +702,7 @@ export function getVehicleTrajectoryKeypoints(slotIndex, slotCenter, mode = 'ent
   const group = getSlotGroup(slotIndex);
   if (!group) return [];
 
-  const laneZ = group === '25_44' ? -6.5 : -23.0;
+  const laneZ = group === '25_44' ? LANE_Z_25_44 : LANE_Z_1_24;
   const laneAtSlot = { x: slotCenter.x, z: laneZ };
 
   if (mode === 'enter') {
@@ -797,7 +801,7 @@ export function planExitPath(slotIndex, slotCenter, stepM = 0.5) {
   if (!group) return [];
 
   const exitTurn = group === '25_44' ? KP.TURN_25_44_EXIT : KP.TURN_1_24_EXIT;
-  const laneZ = group === '25_44' ? -6.5 : -23.0; // Lower lane moved -0.5
+  const laneZ = group === '25_44' ? LANE_Z_25_44 : LANE_Z_1_24;
   const laneStartAtSlot = { x: slotCenter.x, z: laneZ };
 
   const path = [laneStartAtSlot, exitTurn, KP.EXIT];
@@ -810,7 +814,7 @@ export function planExitPath(slotIndex, slotCenter, stepM = 0.5) {
 export function getLanePointForSlot(slotIndex, slotCenter) {
   const group = getSlotGroup(slotIndex);
   if (!group) return null;
-  const laneZ = group === '25_44' ? -6.5 : -23.0; // Lower lane moved -0.5
+  const laneZ = group === '25_44' ? LANE_Z_25_44 : LANE_Z_1_24;
   return { x: slotCenter.x, z: laneZ };
 }
 

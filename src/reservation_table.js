@@ -36,13 +36,19 @@ export function getSimTime() {
   return _simTimeOrigin + (real - _realOrigin) * _simTimeScale;
 }
 
+/** 获取当前仿真时间倍速（1 = 实时，60 = 1min/s，3600 = 1h/s） */
+export function getSimTimeScale() {
+  return _simTimeScale;
+}
+
 /**
  * 设置仿真时间倍速（dashboard 调用）
- * @param {number} scale - 1 = 实时, 2 = 2倍速, 100 = 100倍速
+ * @param {number} scale - 1 = 实时(1s/s), 60 = 1min/s, 3600 = 1hour/s
  */
 export function setSimTimeScale(scale) {
   const t = getSimTime();
-  _simTimeScale = Math.max(0.1, Math.min(100, Number(scale) || 1));
+  // 允许从 0.1x 慢速到 3600x 快速（1 小时 / 秒）
+  _simTimeScale = Math.max(0.1, Math.min(3600, Number(scale) || 1));
   _simTimeOrigin = t;
   _realOrigin = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
 }
