@@ -532,6 +532,7 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
   const pos = robot?.model?.position;
   if (!pos || !toP) return { clear: true };
   const cx = pos.x, cz = pos.z;
+  const distSelfToTarget = Math.hypot(toP.x - cx, toP.z - cz);
   const dx = toP.x - cx, dz = toP.z - cz;
   const len = Math.hypot(dx, dz) || 1;
   const dist2s = speed * SWEPT_HORIZON_SEC;
@@ -547,14 +548,28 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
     if (d2 > SWEPT_NEAR_RADIUS * SWEPT_NEAR_RADIUS) return null;
     const { p1: p3, p2: p4 } = getCapsuleEndpoints(otherPos, otherHeading ?? 0, halfLen);
     const r2 = r + safetyBuffer;
+
+    // Robot-robot priority: 前面的 / 更靠近下一目标节点（例如 R:MP） 的机器人优先通过。
+    // 仅在“双方都是机器人”时应用该优先级；遇到车辆时始终由机器人让行。
+    if (!isVehicle) {
+      const distOtherToTarget = Math.hypot(toP.x - otherPos.x, toP.z - otherPos.z);
+      // 如果自己比对方“明显更靠近”目标节点，则认为自己具有路权，不把对方视为阻挡者。
+      if (distSelfToTarget + 0.4 < distOtherToTarget) {
+        return null;
+      }
+      // 否则（对方更靠近目标，或者距离接近），继续做胶囊体碰撞检测，
+      // 一旦预测到 2 秒内轨迹有重叠，就认为需要让行。
+    }
+
     if (checkCapsuleCollision(p1, p2, r1, p3, p4, r2)) return { agentId: otherId, pos: otherPos, isVehicle };
     return null;
   };
 
   for (const rb of chargingRobots) {
     if (!rb?.model?.position) continue;
-    // Ignore robots that are charging a vehicle; they stay at the spot and should not block moving robots.
-    if (rb.state === 'charging') continue;
+    // 仅把“在路上移动的机器人”（navigating / returning）作为 2 秒轨迹预测中的动态障碍；
+    // 停在充电位 / C_i_0 / home 的静止机器人不参与 swept-volume 预测，由上层静态占用逻辑处理。
+    if (rb.state !== 'navigating' && rb.state !== 'returning') continue;
     const otherId = `robot_${rb.id}`;
     const heading = rb.model.rotation?.y ?? 0;
     const blocker = checkOther(rb.model.position, otherId, false, heading, ROBOT_CAPSULE_HALFLEN, ROBOT_CAPSULE_R);
@@ -3147,7 +3162,7 @@ function createVehicleSequence() {
         // Use gltf.scene directly (do not clone) so AnimationClips work (they reference object UUIDs)
         const carMesh = gltf.scene;
         // 把模型原点移到车体中心：用包围盒计算几何中心，mesh 偏移使 Group 原点在 XZ 中心、车底在场景 y=0 接地
-        const VEHICLE_REF_Y = 0.825; // car.position.y，车体参考点高度；地面 y=0，车底应对齐 0
+        const VEHICLE_REF_Y = 1.05; // car.position.y，车体参考点高度；地面 y=0，车底应对齐 0
         const box = new THREE.Box3().setFromObject(carMesh);
         const center = box.getCenter(new THREE.Vector3());
         const meshOffset = calibrate_vehicle
@@ -4184,63 +4199,71 @@ function animate() {
   }
   controls.update();
 
-  // Push state to dashboard when embedded (?dashboard=1)
+  // Push state to dashboard when embedded (?dashboard=1). Throttled and deferred so
+  // React setState does not run inside rAF and block the next frame (reduces stutter).
   if (typeof window.__dashboardSetState === 'function') {
     dashboardTick++;
-    if (dashboardTick % 30 === 0) {
+    if (dashboardTick % 60 === 0) {
+      const setState = window.__dashboardSetState;
       const orders = orderManager.orders;
-      const completed = orders.filter(o => o.status === 'completed').length;
-      const vehiclesBeingCharged = new Set(chargingRobots.filter(r => r.state === 'charging' && r.targetVehicle).map(r => r.targetVehicle.id));
-      const waiting = vehicles.filter(v => v.phase === 'parked' && v.needsCharging && !vehiclesBeingCharged.has(v.id)).length;
-      const charging = vehiclesBeingCharged.size;
-      const orderDetails = orders.map(o => {
-        const v = vehicles.find(v => v.orderId === o.id) || null;
-        const waitTimeSec = o.recordedWaitTimeSec ?? (v && v.chargingStartedAt != null && o.createdAtSimTime != null
-          ? v.chargingStartedAt - o.createdAtSimTime
-          : null);
-        return {
-          orderId: o.id,
-          vehicleId: v ? v.id : null,
-          spotIndex: o.parkingSpot?.index ?? null,
-          side: o.parkingSpot?.side ?? null,
-          orderStatus: o.status,
-          vehiclePhase: v ? v.phase : null,
-          needsCharging: v ? v.needsCharging : null,
-          demandKwh: v ? (v.chargeDemandKwh ?? null) : (o.recordedDemandKwh ?? null),
-          waitTimeSec,
-        };
-      });
-      const waitValues = orderDetails.map(o => o.waitTimeSec).filter(w => w != null && !Number.isNaN(w));
-      const avgWaitSec = waitValues.length ? waitValues.reduce((s, w) => s + w, 0) / waitValues.length : 0;
-      const simTimeSec = getSimTime();
-      window.__dashboardSetState({
-        simTimeSec,
-        fleetSummary: {
-          total: chargingRobots.length,
-          active: chargingRobots.filter(r => r.state === 'navigating' || r.state === 'charging').length,
-          idle: chargingRobots.filter(r => r.state === 'idle').length,
-          charging: chargingRobots.filter(r => r.state === 'selfCharging' || r.state === 'returning').length,
-        },
-        robots: chargingRobots.map(r => {
-          const rotY = r.model.rotation?.y ?? 0;
-          const headingDeg = ((180 - (rotY * 180 / Math.PI)) + 360) % 360;  // -Z=0°, +X=90°, +Z=180°
+      const robots = chargingRobots;
+      const veh = vehicles;
+      const getTime = getSimTime;
+      const totalKwh = totalKwhDelivered;
+      setTimeout(() => {
+        if (typeof setState !== 'function') return;
+        const completed = orders.filter(o => o.status === 'completed').length;
+        const vehiclesBeingCharged = new Set(robots.filter(r => r.state === 'charging' && r.targetVehicle).map(r => r.targetVehicle.id));
+        const waiting = veh.filter(v => v.phase === 'parked' && v.needsCharging && !vehiclesBeingCharged.has(v.id)).length;
+        const charging = vehiclesBeingCharged.size;
+        const orderDetails = orders.map(o => {
+          const v = veh.find(v => v.orderId === o.id) || null;
+          const waitTimeSec = o.recordedWaitTimeSec ?? (v && v.chargingStartedAt != null && o.createdAtSimTime != null
+            ? v.chargingStartedAt - o.createdAtSimTime
+            : null);
           return {
-            id: `R${r.id}`,
-            soc: Math.min(100, Math.round((r.batteryLevel / ROBOT_BATTERY_KWH) * 100)),
-            state: r.state,
-            position: { x: r.model.position.x, z: r.model.position.z },
-            heading: Math.round(headingDeg * 10) / 10,
+            orderId: o.id,
+            vehicleId: v ? v.id : null,
+            spotIndex: o.parkingSpot?.index ?? null,
+            side: o.parkingSpot?.side ?? null,
+            orderStatus: o.status,
+            vehiclePhase: v ? v.phase : null,
+            needsCharging: v ? v.needsCharging : null,
+            demandKwh: v ? (v.chargeDemandKwh ?? null) : (o.recordedDemandKwh ?? null),
+            waitTimeSec,
           };
-        }),
-        orderStats: {
-          waiting,
-          charging,
-          completed,
-          avgWaitTimeSec: Math.round(avgWaitSec),
-        },
-        totalKwhDelivered: totalKwhDelivered,
-      orderDetails,
-      });
+        });
+        const waitValues = orderDetails.map(o => o.waitTimeSec).filter(w => w != null && !Number.isNaN(w));
+        const avgWaitSec = waitValues.length ? waitValues.reduce((s, w) => s + w, 0) / waitValues.length : 0;
+        setState({
+          simTimeSec: getTime(),
+          fleetSummary: {
+            total: robots.length,
+            active: robots.filter(r => r.state === 'navigating' || r.state === 'charging').length,
+            idle: robots.filter(r => r.state === 'idle').length,
+            charging: robots.filter(r => r.state === 'selfCharging' || r.state === 'returning').length,
+          },
+          robots: robots.map(r => {
+            const rotY = r.model.rotation?.y ?? 0;
+            const headingDeg = ((180 - (rotY * 180 / Math.PI)) + 360) % 360;
+            return {
+              id: `R${r.id}`,
+              soc: Math.min(100, Math.round((r.batteryLevel / ROBOT_BATTERY_KWH) * 100)),
+              state: r.state,
+              position: { x: r.model.position.x, z: r.model.position.z },
+              heading: Math.round(headingDeg * 10) / 10,
+            };
+          }),
+          orderStats: {
+            waiting,
+            charging,
+            completed,
+            avgWaitTimeSec: Math.round(avgWaitSec),
+          },
+          totalKwhDelivered: totalKwh,
+          orderDetails,
+        });
+      }, 0);
     }
   }
 
