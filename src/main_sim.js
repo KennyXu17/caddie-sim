@@ -470,6 +470,8 @@ function isOccupiedPhysically(x, z, excludeAgentId = null, radius = 1.0) {
   }
   for (const rb of chargingRobots) {
     if (!rb?.model?.position) continue;
+    // 仅把“在路上移动的机器人”视为动态物理占用；静态的（停车位充电 / 站内 idle / 自充电）不阻塞路径
+    if (rb.state !== 'navigating' && rb.state !== 'returning') continue;
     const id = `robot_${rb.id}`;
     if (excludeAgentId && id === excludeAgentId) continue;
     const dx = rb.model.position.x - x;
@@ -1487,6 +1489,9 @@ const show_graph = (() => {
   }
 })();
 
+// Vehicle trajectory lines are only visible when graph debug is enabled
+trajectoryGroup.visible = show_graph;
+
 const debug_collision = (() => {
   try {
     const v = new URLSearchParams(window.location.search).get('debug_collision');
@@ -2009,13 +2014,13 @@ class ChargingRobot {
   selfCharge(batteryStation, onComplete) {
     this.state = 'selfCharging';
     const stationPos = batteryStation.position;
+    const homeSpot = this.homeSpot;
 
-    // Navigate to charging station
-    const chargingPos = {
-      x: stationPos.x,
-      z: stationPos.z + 0.5,
-      y: stationPos.y
-    };
+    // Navigate to home charge0 node (C_2_0 or C_13_0). Fall back to station front if missing.
+    const c0 = homeSpot ? getCharge0Position(homeSpot.index) : null;
+    const chargingPos = c0
+      ? { x: c0.x, z: c0.z, y: c0.y != null ? c0.y : ROBOT_Y_OFFSET }
+      : { x: stationPos.x, z: stationPos.z + 0.5, y: stationPos.y };
 
     const navTl = this.navigateTo(chargingPos, () => {
       const chargeTl = gsap.timeline({
@@ -2025,14 +2030,24 @@ class ChargingRobot {
           if (onComplete) onComplete();
         }
       });
-      const rot = robotEdgeHeading;
-      const dx = stationPos.x - chargingPos.x;
-      const dz = stationPos.z - chargingPos.z;
-      const rawAngle = rot(dx, dz);
-      const currentNorm = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
-      this.model.rotation.y = currentNorm;
-      const angle = normalizeAngleShortestPath(currentNorm, rawAngle);
-      chargeTl.to(this.model.rotation, { y: angle, duration: 0.8, ease: "power1.inOut" });
+      // 自充电时的朝向与给车辆充电时一致：根据车位开口 (+z / -z) 决定车头朝向
+      const spot = homeSpot;
+      if (spot) {
+        const chargeHeading = (spot.opening === '+z') ? ROBOT_ROT_EXTRA : (Math.PI + ROBOT_ROT_EXTRA);
+        const currentNorm = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
+        this.model.rotation.y = currentNorm;
+        const angle = normalizeAngleShortestPath(currentNorm, chargeHeading);
+        chargeTl.to(this.model.rotation, { y: angle, duration: 0.8, ease: "power1.inOut" });
+      } else {
+        const rot = robotEdgeHeading;
+        const dx = stationPos.x - chargingPos.x;
+        const dz = stationPos.z - chargingPos.z;
+        const rawAngle = rot(dx, dz);
+        const currentNorm = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
+        this.model.rotation.y = currentNorm;
+        const angle = normalizeAngleShortestPath(currentNorm, rawAngle);
+        chargeTl.to(this.model.rotation, { y: angle, duration: 0.8, ease: "power1.inOut" });
+      }
       chargeTl.to({}, { duration: 2, onStart: () => console.log(`🔌 Robot${this.id} self-charging at station...`) });
       chargeTl.to({}, { duration: 0, onComplete: () => console.log(`✅ Robot${this.id} self-charging complete`) });
     });
@@ -2537,7 +2552,7 @@ texLoader.load(
 // === Load Background Building (Treasure Island) ===
 loader.load(
   // '/Treasure_Island_3.glb',
-  'Treasure_Island_Parking_Lot_resize.glb',
+  'Treasure_Island_Parking_Lot_resize_.glb',
   (gltf) => {
     const bg = gltf.scene;
     bg.scale.set(0.27, 0.27, 0.27);
@@ -2593,14 +2608,14 @@ batteryStationSpots.forEach((spot, idx) => {
 });
 
 // === Load Charging Robots (Small Caddie) ===
-// 小机器人初始位置：2、13 车位中心（与充电站位置相同）；1、14 禁止停车
+// 小机器人初始位置：C_2_0 / C_13_0（与给车辆充电时相同的 charge0 节点）；1、14 禁止停车
 const robotHomeSpots = [spot2, spot13];
 const robotPositions = robotHomeSpots.map((s) => {
-  const ci = getChargePointPosition(s.index);
+  const c0 = getCharge0Position(s.index) || getChargePointPosition(s.index);
   return {
-    x: ci.x,
-    y: (ci.y != null ? ci.y : 0) + ROBOT_Y_OFFSET,
-    z: ci.z
+    x: c0.x,
+    y: (c0.y != null ? c0.y : 0) + ROBOT_Y_OFFSET,
+    z: c0.z
   };
 });
 
@@ -3027,6 +3042,8 @@ function visualizeGraphStructures() {
     graphGroup.add(dot);
   }
   for (const n of vehicleLane.nodes) {
+    // cf_25_44_left/right 仅作为车辆 lane 的内部节点，不在 Graph overlay 中显示点
+    if (n.id === 'cf_25_44_left' || n.id === 'cf_25_44_right') continue;
     const isTurnEndpoint = n.type === 'turn_endpoint';
     const dot = new THREE.Mesh(
       isTurnEndpoint ? turnEndpointDotGeom : dotGeom,
@@ -3071,9 +3088,9 @@ function visualizeGraphStructures() {
     } else if (n.type === 'spot') {
       addGraphLabel(n.id, n.x, GRAPH_Y + 0.05, n.z, 'parking_spot');
     } else if (n.type === 'conflict') {
-      const name = n.id === 'cf_25_44_left'
-        ? 'R:CF_25_44_left'
-        : (n.id === 'cf_25_44_right' ? 'R:CF_25_44_right' : `R:${n.id}`);
+      // 车辆车道图里的 cf_25_44_left/right 只作为内部节点使用，不再在 Graph overlay 中显示
+      if (n.id === 'cf_25_44_left' || n.id === 'cf_25_44_right') continue;
+      const name = `R:${n.id}`;
       addGraphLabel(name, n.x, GRAPH_Y + 0.05, n.z, 'robot_conflict');
     } else {
       addGraphLabel(`V:${n.id}`, n.x, GRAPH_Y + 0.05, n.z, 'vehicle_kp');
@@ -4027,9 +4044,9 @@ function animate() {
   } else if (calibrationMarker) {
     calibrationMarker.visible = false;
   }
-  // Record and draw vehicle trajectories when entering or leaving
+  // Record and draw vehicle trajectories when entering or leaving (only when show_graph is enabled)
   vehicles.forEach(vehicle => {
-    if (vehicle.model && vehicle.model.position && (vehicle.phase === 'entering' || vehicle.phase === 'leaving')) {
+    if (show_graph && vehicle.model && vehicle.model.position && (vehicle.phase === 'entering' || vehicle.phase === 'leaving')) {
       const id = vehicle.id;
       const p = vehicle.model.position;
       let rec = vehicleTrajectories.get(id);
@@ -4067,7 +4084,12 @@ function animate() {
         }
       }
     }
-    if (vehicle.model && vehicle.model.position) {
+    if (
+      vehicle.model &&
+      vehicle.model.position &&
+      vehicle.phase !== 'parked' &&
+      vehicle.phase !== 'gone'
+    ) {
       collisionAvoidance.addOccupiedPosition(
         { x: vehicle.model.position.x, z: vehicle.model.position.z },
         `vehicle_${vehicle.id}`,
@@ -4086,7 +4108,12 @@ function animate() {
   });
   chargingRobots.forEach(robot => {
     if (robot.model?.userData?.mixer) robot.model.userData.mixer.update(simDt);
-    if (robot.model && robot.model.position) {
+    // 仅把“在路上移动的机器人”视为动态障碍物；静止状态（充电 / idle / 自充电等）不计入碰撞规避
+    if (
+      robot.model &&
+      robot.model.position &&
+      (robot.state === 'navigating' || robot.state === 'returning')
+    ) {
       collisionAvoidance.addOccupiedPosition(
         { x: robot.model.position.x, z: robot.model.position.z },
         `robot_${robot.id}`,

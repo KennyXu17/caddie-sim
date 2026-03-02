@@ -131,18 +131,11 @@ function buildGraph() {
     nodes.set(c.id, { id: c.id, x: c.x, z: c.z, y: 0, type: 'conflict', side: c.side, slotGroup: c.slotGroup });
   }
 
-  // R:turn_1_right、R:turn_2_right、R:CF_1_24（cf_1_14_right）往 x 正方向移 0.1
-  const RIGHT_OFFSET_X = 0.1;
+  // R:turn_1_right、R:turn_2_right、R:CF_1_24（cf_1_14_right）x 坐标统一为 17
   for (const id of ['turn_1_right', 'turn_2_right', 'cf_1_14_right']) {
     const n = nodes.get(id);
-    if (n) n.x += RIGHT_OFFSET_X;
+    if (n) n.x = 17;
   }
-
-  // Intermediate turn nodes between row 2 and row 3 (left/right columns)，不随 LEFT_X/RIGHT_X 平移
-  nodes.set('turn_3_left_0', { id: 'turn_3_left_0', x: TURN0_LEFT_X, z: -9.5, y: 0, type: 'turn', row: 3, side: 'left' });
-  nodes.set('turn_2_left_0', { id: 'turn_2_left_0', x: TURN0_LEFT_X, z: -20, y: 0, type: 'turn', row: 2, side: 'left' });
-  nodes.set('turn_3_right_0', { id: 'turn_3_right_0', x: TURN0_RIGHT_X, z: -9.5, y: 0, type: 'turn', row: 3, side: 'right' });
-  nodes.set('turn_2_right_0', { id: 'turn_2_right_0', x: TURN0_RIGHT_X, z: -20, y: 0, type: 'turn', row: 2, side: 'right' });
 
   for (const spot of PARKING_SPOTS) {
     const cp = spot.chargePoint;
@@ -217,6 +210,10 @@ function buildGraph() {
   for (let i = 15; i <= 23; i++) addDirectedEdge(moveId(i), moveId(i + 1));
   addDirectedEdge(moveId(24), turnId(2, 'right'));
 
+  // Home charge0 nodes C_2_0 / C_13_0 connected to first-row turns with bidirectional edges
+  addBidirectionalEdge(charge0Id(2), turnId(1, 'left'));
+  addBidirectionalEdge(charge0Id(13), turnId(1, 'right'));
+
   // Row 3 (spots 25-34):
   // turn_3_right -> MP34 -> MP33 -> ... -> MP25 -> turn_3_left (one-way, right to left)
   addDirectedEdge(turnId(3, 'right'), moveId(34));
@@ -267,10 +264,8 @@ function buildGraph() {
   // turn_1_left -> cf_1_14_left -> turn_2_left (one-way, going down/south)
   addDirectedEdge(turnId(1, 'left'), 'cf_1_14_left');
   addDirectedEdge('cf_1_14_left', turnId(2, 'left'));
-  // turn_3_left -> turn_3_left_0 -> turn_2_left_0 -> turn_2_left (one-way, row 3 to row 2)
-  addDirectedEdge(turnId(3, 'left'), 'turn_3_left_0');
-  addDirectedEdge('turn_3_left_0', 'turn_2_left_0');
-  addDirectedEdge('turn_2_left_0', turnId(2, 'left'));
+  // turn_3_left -> turn_2_left (one-way, row 3 to row 2)
+  addDirectedEdge(turnId(3, 'left'), turnId(2, 'left'));
   // turn_3_left -> cf_25_44_left -> turn_4_left (one-way, part of upper loop)
   addDirectedEdge(turnId(3, 'left'), 'cf_25_44_left');
   addDirectedEdge('cf_25_44_left', turnId(4, 'left'));
@@ -279,10 +274,8 @@ function buildGraph() {
   // turn_2_right -> cf_1_14_right -> turn_1_right (one-way, going up/north)
   addDirectedEdge(turnId(2, 'right'), 'cf_1_14_right');
   addDirectedEdge('cf_1_14_right', turnId(1, 'right'));
-  // turn_2_right -> turn_2_right_0 -> turn_3_right_0 -> turn_3_right (one-way, row 2 to row 3)
-  addDirectedEdge(turnId(2, 'right'), 'turn_2_right_0');
-  addDirectedEdge('turn_2_right_0', 'turn_3_right_0');
-  addDirectedEdge('turn_3_right_0', turnId(3, 'right'));
+  // turn_2_right -> turn_3_right (one-way, row 2 to row 3)
+  addDirectedEdge(turnId(2, 'right'), turnId(3, 'right'));
   // turn_4_right -> cf_25_44_right -> turn_3_right (one-way, part of upper loop)
   addDirectedEdge(turnId(4, 'right'), 'cf_25_44_right');
   addDirectedEdge('cf_25_44_right', turnId(3, 'right'));

@@ -144,8 +144,10 @@ export function getVehicleLaneGraphData() {
   const mainPath = [KP.ENTRANCE.id, KP.TURN_25_44_ENTRY.id, KP.TURN_1_24_ENTRY.id, ...lowerIds, KP.TURN_1_24_EXIT.id, KP.TURN_25_44_EXIT.id, KP.EXIT.id];
   pathWithTurnEndpoints(mainPath);
 
-  // Upper lane branch: turn_25_44_entry -> cf_left -> slot chain -> cf_right -> turn_25_44_exit
-  const upperPath = [KP.TURN_25_44_ENTRY.id, CF_25_44_LEFT.id, ...upperIds, CF_25_44_RIGHT.id, KP.TURN_25_44_EXIT.id];
+  // Upper lane branch (25–44): direct from entry turn to slot chain to exit turn
+  // 原先为: turn_25_44_entry -> cf_25_44_left -> slot_25_35..slot_34_44 -> cf_25_44_right -> turn_25_44_exit
+  // 现在移除车辆车道上的 CF 节点，路径为: V:turn_25_44_entry -> V:slot_25_35..slot_34_44 -> V:turn_25_44_exit
+  const upperPath = [KP.TURN_25_44_ENTRY.id, ...upperIds, KP.TURN_25_44_EXIT.id];
   pathWithTurnEndpoints(upperPath);
 
   // 整条线 turn_entry->...->turn_exit 上所有点的 z 统一为两侧 Cxx_0 的 z 平均值
