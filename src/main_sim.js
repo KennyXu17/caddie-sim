@@ -578,6 +578,8 @@ function getBlockerRobotAt(x, z, excludeAgentId, radius = 1.0) {
   const r2 = radius * radius;
   for (const rb of chargingRobots) {
     if (!rb?.model?.position) continue;
+    // 仅把“在路上移动的机器人”（navigating/returning）视为阻挡，静止在 C_i_0 或充电/idle 的机器人不作为物理障碍
+    if (rb.state !== 'navigating' && rb.state !== 'returning') continue;
     const id = `robot_${rb.id}`;
     if (excludeAgentId && id === excludeAgentId) continue;
     const dx = rb.model.position.x - x;
