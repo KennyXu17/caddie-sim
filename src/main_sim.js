@@ -1327,11 +1327,23 @@ cameraInfoEl.style.cssText = 'position:fixed;bottom:12px;left:12px;background:rg
 cameraInfoEl.style.display = 'none';
 document.body.appendChild(cameraInfoEl);
 
-// Sim time display (top-right), follows accelerated sim time (getSimTime / setSimTimeScale)
+// Sim time + perf display (top-right). 上行是仿真时间，下行是 FPS/CPU/GPU 近似状态。
 const simTimeEl = document.createElement('div');
 simTimeEl.id = 'sim-time';
 simTimeEl.style.cssText = 'position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.85);color:#facc15;padding:6px 10px;border-radius:6px;font-family:monospace;font-size:12px;pointer-events:none;z-index:10000;border:1px solid rgba(250,204,21,0.5);';
+const simTimeTextEl = document.createElement('div');
+const simPerfTextEl = document.createElement('div');
+simPerfTextEl.style.marginTop = '2px';
+simPerfTextEl.style.fontSize = '11px';
+simPerfTextEl.style.color = '#9ca3af';
+simTimeEl.appendChild(simTimeTextEl);
+simTimeEl.appendChild(simPerfTextEl);
 document.body.appendChild(simTimeEl);
+
+// FPS / CPU / GPU 近似统计（在 animation loop 中每数百毫秒刷新一次）
+let perfLastUpdate = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+let perfFrameCount = 0;
+let perfAccumWorkMs = 0;
 
 let cameraInfoVisible = false;
 let cameraInfoHideTimer = null;
@@ -4074,9 +4086,9 @@ let lastTime = performance.now();
 let dashboardTick = 0;
 function animate() {
   requestAnimationFrame(animate);
-  const now = performance.now();
-  const delta = (now - lastTime) / 1000;
-  lastTime = now;
+  const frameStart = performance.now();
+  const delta = (frameStart - lastTime) / 1000;
+  lastTime = frameStart;
 
   const LABEL_Y_OFFSET = 10; // same height as model (no offset)
 
@@ -4086,7 +4098,7 @@ function animate() {
    const minutes = Math.floor((simT % 3600) / 60);
    const seconds = Math.floor(simT % 60);
    const pad = (n) => String(n).padStart(2, '0');
-   simTimeEl.textContent = `Sim time  ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+   simTimeTextEl.textContent = `Sim time  ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 
   // Clean up trajectories for vehicles that have left the lot (removed from vehicles)
   const activeIds = new Set(vehicles.map(v => v.id));
@@ -4338,6 +4350,24 @@ function animate() {
   composer.render();
 
   captureFrame();
+
+  // 更新 FPS / CPU / GPU 近似信息（基于帧耗时的粗略估算）
+  const frameEnd = performance.now();
+  const workMs = frameEnd - frameStart;
+  perfFrameCount++;
+  perfAccumWorkMs += workMs;
+  if (frameEnd - perfLastUpdate >= 250) {
+    const avgMs = perfAccumWorkMs / Math.max(1, perfFrameCount);
+    const fps = avgMs > 0 ? 1000 / avgMs : 0;
+    const budgetMs = 1000 / 60;
+    // 帧耗时占 60fps 预算的比例，上限 100%（超过预算就显示 100%）
+    const cpuPct = Math.min(100, (avgMs / budgetMs) * 100);
+    const gpuPct = cpuPct;
+    simPerfTextEl.textContent = `FPS ${fps.toFixed(0)}  CPU ~${cpuPct.toFixed(0)}%  GPU ~${gpuPct.toFixed(0)}%`;
+    perfLastUpdate = frameEnd;
+    perfFrameCount = 0;
+    perfAccumWorkMs = 0;
+  }
 }
 animate();
 
