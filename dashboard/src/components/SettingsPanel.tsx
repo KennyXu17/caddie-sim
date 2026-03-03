@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Card, CardContent, Typography, Box, FormControl, InputLabel, Select, MenuItem } from '@mui/material';
 import SpeedIcon from '@mui/icons-material/Speed';
 
@@ -24,7 +24,7 @@ const AVG_DEMAND_OPTIONS = [10, 20, 30, 40, 50];
 const C_RATE_OPTIONS = [1, 2, 5, 10];
 const ROBOT_BATTERY_OPTIONS = [100, 200, 400];
 
-export function SettingsPanel() {
+export const SettingsPanel = memo(function SettingsPanel() {
   const [speed, setSpeed] = useState<number>(1);
   const [ordersPerHour, setOrdersPerHour] = useState(100);
   const [avgDemandKwh, setAvgDemandKwh] = useState(20);
@@ -170,4 +170,4 @@ export function SettingsPanel() {
       </CardContent>
     </Card>
   );
-}
+});

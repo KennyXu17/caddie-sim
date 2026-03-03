@@ -4269,13 +4269,17 @@ function animate() {
   }
   controls.update();
 
-  // 推送到 dashboard：iframe 内用 postMessage（不抢主线程），同页内用 __dashboardSetState
-  const inIframe = typeof window !== 'undefined' && window !== window.top;
-  const hasDashboard = inIframe || typeof window.__dashboardSetState === 'function';
+  // 推送仿真状态到 dashboard。
+  // isPopup: 仿真在独立窗口（window.opener 存在）→ 发给 opener
+  // inIframe: 仿真在 iframe 内 → 发给 parent
+  // 否则：同页嵌入 → 直接调用 __dashboardSetState
+  const isPopup = typeof window !== 'undefined' && !!window.opener;
+  const inIframe = typeof window !== 'undefined' && window !== window.top && !isPopup;
+  const hasDashboard = typeof window.__dashboardSetState === 'function' || inIframe || isPopup;
   if (hasDashboard) {
     dashboardTick++;
-    const DASHBOARD_PUSH_INTERVAL = 90;
-    if (dashboardTick % DASHBOARD_PUSH_INTERVAL === 0) {
+    const pushInterval = inIframe ? 300 : isPopup ? 30 : 90; // popup最快：独立线程无开销
+    if (dashboardTick % pushInterval === 0) {
       const orders = orderManager.orders;
       const robots = chargingRobots;
       const veh = vehicles;
@@ -4333,10 +4337,12 @@ function animate() {
           totalKwhDelivered: totalKwh,
           orderDetails,
         };
-        if (inIframe) {
-          window.parent.postMessage({ type: 'simState', payload: state }, '*');
-        } else if (typeof window.__dashboardSetState === 'function') {
+        if (typeof window.__dashboardSetState === 'function') {
           window.__dashboardSetState(state);
+        } else if (isPopup && window.opener) {
+          window.opener.postMessage({ type: 'simState', payload: state }, '*');
+        } else if (inIframe) {
+          window.parent.postMessage({ type: 'simState', payload: state }, '*');
         }
       };
       if (typeof requestIdleCallback !== 'undefined') {
