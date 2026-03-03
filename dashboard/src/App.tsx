@@ -7,10 +7,8 @@ import { FleetStatusCards } from './components/FleetStatusCards';
 import { SOCPanel } from './components/SOCPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { OrderStatsPanel } from './components/OrderStatsPanel';
-import type { SimulatorState } from './types';
-
-/** 仿真页 URL：独立页面只跑 Three.js，与 dashboard 完全分离的主线程 */
-const SIM_URL = typeof window !== 'undefined' ? new URL('/', window.location.href).href : '';
+import type { SimulatorState, RenderConfig } from './types';
+import { DEFAULT_RENDER_CONFIG } from './types';
 
 declare global {
   interface Window {
@@ -21,12 +19,25 @@ declare global {
   }
 }
 
+/** Build the simulator popup URL, embedding render config as query params. */
+function buildSimUrl(rc: RenderConfig): string {
+  const base = new URL('/', window.location.href);
+  base.searchParams.set('ssaa',   String(rc.ssaa));
+  base.searchParams.set('shadow', String(rc.shadowRes));
+  base.searchParams.set('ssao',   rc.ssao  ? '1' : '0');
+  base.searchParams.set('bloom',  rc.bloom ? '1' : '0');
+  return base.href;
+}
+
 export default function App() {
   const simPanelRef = useRef<HTMLDivElement>(null);
   const simWindowRef = useRef<Window | null>(null);
   const checkClosedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [simRunning, setSimRunning] = useState(false);
   const [simState, setSimState] = useState<SimulatorState | null>(null);
+
+  // Render config — configured before launch, passed as URL query params
+  const [renderConfig, setRenderConfig] = useState<RenderConfig>(DEFAULT_RENDER_CONFIG);
 
   // Receive state from simulator popup
   useEffect(() => {
@@ -57,7 +68,7 @@ export default function App() {
     };
   }, []);
 
-  const openSimulator = useCallback(() => {
+  const openSimulator = useCallback((rc?: RenderConfig) => {
     const el = simPanelRef.current;
     if (!el) return;
 
@@ -73,8 +84,8 @@ export default function App() {
     // Compute popup position to exactly match the panel's screen coordinates
     const rect = el.getBoundingClientRect();
     const left = Math.round(window.screenX + rect.left);
-    const top = Math.round(window.screenY + rect.top);
-    const width = Math.round(rect.width);
+    const top  = Math.round(window.screenY + rect.top);
+    const width  = Math.round(rect.width);
     const height = Math.round(rect.height);
 
     const features = [
@@ -91,7 +102,8 @@ export default function App() {
       'resizable=yes',
     ].join(',');
 
-    const win = window.open(SIM_URL, 'caddie-sim', features);
+    const simUrl = buildSimUrl(rc ?? renderConfig);
+    const win = window.open(simUrl, 'caddie-sim', features);
     if (!win) {
       alert('弹窗被拦截，请在浏览器中允许此页面弹出新窗口后再试。');
       return;
@@ -112,7 +124,7 @@ export default function App() {
         }
       }
     }, 800);
-  }, []);
+  }, [renderConfig]);
 
   const stopSimulator = useCallback(() => {
     if (simWindowRef.current && !simWindowRef.current.closed) {
@@ -186,7 +198,7 @@ export default function App() {
               variant="contained"
               color="primary"
               startIcon={<PlayArrowIcon />}
-              onClick={openSimulator}
+              onClick={() => openSimulator()}
               sx={{ fontFamily: 'JetBrains Mono', fontSize: 12 }}
             >
               Run Simulation
@@ -199,7 +211,7 @@ export default function App() {
           sx={{
             flex: 1,
             display: 'grid',
-            gridTemplateColumns: '200px 1fr 200px',
+            gridTemplateColumns: '200px 1fr 240px',
             gridTemplateRows: '1fr auto',
             gap: 1.5,
             p: 1.5,
@@ -249,7 +261,7 @@ export default function App() {
                   <Typography variant="body2" color="text.secondary" fontFamily="JetBrains Mono">
                     Simulation running in separate window
                   </Typography>
-                  <Button size="small" variant="text" onClick={openSimulator} sx={{ fontSize: 11, color: 'text.disabled' }}>
+                  <Button size="small" variant="text" onClick={() => openSimulator()} sx={{ fontSize: 11, color: 'text.disabled' }}>
                     Re-open window
                   </Button>
                 </>
@@ -263,7 +275,7 @@ export default function App() {
                     color="primary"
                     size="large"
                     startIcon={<PlayArrowIcon />}
-                    onClick={openSimulator}
+                    onClick={() => openSimulator()}
                     sx={{ fontFamily: 'JetBrains Mono' }}
                   >
                     Run Simulation
@@ -282,7 +294,12 @@ export default function App() {
             sx={{ p: 1.5, gridRow: '1 / -1', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto', bgcolor: 'background.paper' }}
           >
             <SOCPanel robots={simState?.robots} />
-            <SettingsPanel />
+            <SettingsPanel
+              simRunning={simRunning}
+              renderConfig={renderConfig}
+              onRenderConfigChange={(patch) => setRenderConfig((prev) => ({ ...prev, ...patch }))}
+              onRunSimulation={() => openSimulator()}
+            />
           </Paper>
 
           {/* Bottom stats */}

@@ -1,5 +1,28 @@
 export type RobotStateLabel = 'active' | 'idle' | 'charging';
 
+// ── Renderer / performance settings ──────────────────────────────────────────
+export type RenderQuality = 'low' | 'medium' | 'high' | 'custom';
+
+export interface RenderConfig {
+  quality: RenderQuality;
+  /** Internal render resolution multiplier (1 = native, 2 = 4× pixels) */
+  ssaa: number;
+  /** Shadow map size in pixels (one side) */
+  shadowRes: number;
+  /** Screen-Space Ambient Occlusion */
+  ssao: boolean;
+  /** Unreal Bloom post-process */
+  bloom: boolean;
+}
+
+export const RENDER_PRESETS: Record<Exclude<RenderQuality, 'custom'>, Omit<RenderConfig, 'quality'>> = {
+  low:    { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false },
+  medium: { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: true  },
+  high:   { ssaa: 2,   shadowRes: 4096, ssao: true,  bloom: true  },
+};
+
+export const DEFAULT_RENDER_CONFIG: RenderConfig = { quality: 'medium', ...RENDER_PRESETS.medium };
+
 export interface RobotStatus {
   id: string;
   soc: number;

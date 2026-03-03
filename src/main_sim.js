@@ -226,8 +226,8 @@ function getVehicleExitPathNodes(slotIndex, slotCenter = null) {
 // Maximum wait time before forcing resume (deadlock prevention)
 const GATE_TIMEOUT_MS = 15000;
 
-// Dynamic re-planning threshold: if blocked for this long, attempt to find alternate path
-const REPLAN_THRESHOLD_MS = 5000;
+// Dynamic re-planning threshold in SIM seconds (speed-invariant)
+const REPLAN_THRESHOLD_SIM_SEC = 5;
 const MAX_REPLAN_ATTEMPTS = 3;
 
 function addGateWaitAtPoint(tl, x, z, agentId, holdSec = 0.8, pollMs = 200) {
@@ -641,9 +641,9 @@ function addGateWaitUntilNextNodeClear(tl, toP, agentId, radius = 1.0, pollMs = 
       if (isDebugCollisionEnabled() && r2.blocker) {
         registerGateWait(agentId, myPos, r2.blocker.pos, r2.blocker.agentId);
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -678,9 +678,9 @@ function addGateWaitUntilSegmentClear(tl, fromP, toP, agentId, radius = 1.0, pol
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -850,9 +850,9 @@ function addGateWaitAtCurrentForVehicleNodes(tl, agentId, vehicleNodeIds, extraP
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -1023,9 +1023,9 @@ function addApproachCFWaitingRule(tl, fromWp, toWp, agentId) {
         tl.resume();
         return;
       }
-      setTimeout(poll, pollMs);
+      setTimeoutSim(poll, pollMs / 1000);
     };
-    setTimeout(poll, pollMs);
+    setTimeoutSim(poll, pollMs / 1000);
   });
 }
 
@@ -1064,8 +1064,39 @@ scene.add(trajectoryGroup);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(-0.56, 20.38, 21.26);
 
+// === Render Quality Config ===
+// Preset:  ?quality=high   → ssaa=2, shadow=4096, ssao=on,  bloom=on
+//          ?quality=medium → ssaa=1, shadow=2048, ssao=on,  bloom=on  (default)
+//          ?quality=low    → ssaa=1, shadow=1024, ssao=off, bloom=off
+// Per-flag overrides: ?ssaa=1.5  ?shadow=2048  ?ssao=0  ?bloom=0
+const _renderConfig = (() => {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const preset = (p.get('quality') || 'medium').toLowerCase();
+    const presets = {
+      high:   { ssaa: 2,   shadowRes: 4096, ssao: true,  bloom: true,  ssaoKernel: 6 },
+      medium: { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: true,  ssaoKernel: 4 },
+      low:    { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false, ssaoKernel: 0 },
+    };
+    const d = presets[preset] ?? presets.medium;
+    const parseBool = (key, def) => {
+      const v = p.get(key);
+      return v == null ? def : !['0', 'false', 'no', 'off'].includes(v.toLowerCase());
+    };
+    return {
+      ssaa:       parseFloat(p.get('ssaa')   ?? d.ssaa),
+      shadowRes:  parseInt(p.get('shadow')   ?? d.shadowRes, 10),
+      ssao:       parseBool('ssao',  d.ssao),
+      bloom:      parseBool('bloom', d.bloom),
+      ssaoKernel: d.ssaoKernel,
+    };
+  } catch {
+    return { ssaa: 1, shadowRes: 2048, ssao: true, bloom: true, ssaoKernel: 4 };
+  }
+})();
+
 // === Renderer (physically correct: ACES, sRGB, soft shadows) ===
-const scale = 2;
+const scale = _renderConfig.ssaa;
 const renderer = new THREE.WebGLRenderer({ antialias: false }); // FXAA in post
 const simContainer = window.__simulatorContainer || document.body;
 const initW = simContainer === document.body ? window.innerWidth * scale : Math.max(1, simContainer.clientWidth) * scale;
@@ -1096,8 +1127,8 @@ scene.add(hemiLight);
 const dirLight = new THREE.DirectionalLight(0xffdd99, 0.66);
 dirLight.position.set(28, 42, 24);
 dirLight.castShadow = true;
-dirLight.shadow.mapSize.width = 4096;
-dirLight.shadow.mapSize.height = 4096;
+dirLight.shadow.mapSize.width = _renderConfig.shadowRes;
+dirLight.shadow.mapSize.height = _renderConfig.shadowRes;
 dirLight.shadow.camera.near = 0.5;
 dirLight.shadow.camera.far = 500;
 dirLight.shadow.camera.left = -55;
@@ -1127,7 +1158,7 @@ pmremGenerator.dispose();
 
 const rgbeLoader = new RGBELoader();
 rgbeLoader.load(
-  'https://threejs.org/examples/textures/equirectangular/venice_sunset_1k.hdr',
+  '/venice_sunset_1k.hdr',
   (tex) => {
     const pmrem = new THREE.PMREMGenerator(renderer);
     pmrem.compileEquirectangularShader();
@@ -1142,24 +1173,33 @@ rgbeLoader.load(
 // 无雾效
 scene.fog = null;
 
-// === Postprocessing (SSAO + Bloom + FXAA，照片级真实感) ===
+// === Postprocessing (SSAO + Bloom + FXAA, controlled by _renderConfig) ===
 const composer = new EffectComposer(renderer);
 composer.setSize(initW, initH);
 composer.setPixelRatio(renderer.getPixelRatio());
 composer.addPass(new RenderPass(scene, camera));
-const ssaoPass = new SSAOPass(scene, camera, initW, initH);
-ssaoPass.kernelRadius = 6;
-ssaoPass.minDistance = 0.005;
-ssaoPass.maxDistance = 0.12;
-ssaoPass.output = SSAOPass.OUTPUT.Default;
-composer.addPass(ssaoPass);
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(initW, initH),
-  0.22,
-  0.4,
-  0.88
-);
-composer.addPass(bloomPass);
+
+let ssaoPass = null;
+if (_renderConfig.ssao) {
+  ssaoPass = new SSAOPass(scene, camera, initW, initH);
+  ssaoPass.kernelRadius = _renderConfig.ssaoKernel;
+  ssaoPass.minDistance = 0.005;
+  ssaoPass.maxDistance = 0.12;
+  ssaoPass.output = SSAOPass.OUTPUT.Default;
+  composer.addPass(ssaoPass);
+}
+
+let bloomPass = null;
+if (_renderConfig.bloom) {
+  bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(initW, initH),
+    0.22,
+    0.4,
+    0.88
+  );
+  composer.addPass(bloomPass);
+}
+
 composer.addPass(new FXAAPass());
 composer.addPass(new OutputPass());
 
@@ -2030,27 +2070,26 @@ class ChargingRobot {
     return mainTl;
     };
 
-    let blockStartTime = null;
+    let blockStartSimTime = null;
     let replanAttempts = 0;
     const tryStart = () => {
       const t0 = getSimTime();
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
       if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (!blockStartTime) blockStartTime = Date.now();
-        const blockedDuration = Date.now() - blockStartTime;
-        // Dynamic re-planning: if blocked too long, force re-compute path via ST A*
-        if (blockedDuration > REPLAN_THRESHOLD_MS && replanAttempts < MAX_REPLAN_ATTEMPTS) {
+        if (blockStartSimTime === null) blockStartSimTime = t0;
+        const blockedSimDuration = t0 - blockStartSimTime;
+        // Dynamic re-planning: if blocked too long in sim time, force re-compute path via ST A*
+        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
           replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning (attempt ${replanAttempts}) after ${(blockedDuration/1000).toFixed(1)}s blocked`);
-          // Force re-compute will happen on next tryStart call since computePathAndFull uses current time
-          blockStartTime = Date.now(); // Reset timer for new path attempt
+          console.log(`🔄 Robot${this.id} re-planning (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
+          blockStartSimTime = t0; // Reset timer for new path attempt
         }
-        setTimeout(tryStart, 250);
+        setTimeoutSim(tryStart, 0.25);
         return;
       }
       // Path is clear, reset tracking
-      blockStartTime = null;
+      blockStartSimTime = null;
       replanAttempts = 0;
       // Log the planned path
       logAgentPath(`Robot${this.id}`, wps, `CP${spot.index} (charge vehicle ${vehicle.id})`, 'charge');
@@ -2295,18 +2334,18 @@ class ChargingRobot {
     return tl;
     };
 
-    let blockStartTime = null;
+    let blockStartSimTime = null;
     let replanAttempts = 0;
     const tryStart = () => {
       const t0 = getSimTime();
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
       if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (!blockStartTime) blockStartTime = Date.now();
-        const blockedDuration = Date.now() - blockStartTime;
-        if (blockedDuration > 1500) {
-          console.warn(`⚠️ Robot${this.id} force leaving after ${(blockedDuration / 1000).toFixed(1)}s blocked`);
-          blockStartTime = null;
+        if (blockStartSimTime === null) blockStartSimTime = t0;
+        const blockedSimDuration = t0 - blockStartSimTime;
+        if (blockedSimDuration > 1.5) {
+          console.warn(`⚠️ Robot${this.id} force leaving after ${blockedSimDuration.toFixed(1)}s sim blocked`);
+          blockStartSimTime = null;
           replanAttempts = 0;
           logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, recharge)`, 'return-home');
           releaseAgent(agentId);
@@ -2316,15 +2355,15 @@ class ChargingRobot {
           runReturnHome();
           return;
         }
-        if (blockedDuration > REPLAN_THRESHOLD_MS && replanAttempts < MAX_REPLAN_ATTEMPTS) {
+        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
           replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning return home (attempt ${replanAttempts}) after ${(blockedDuration/1000).toFixed(1)}s blocked`);
-          blockStartTime = Date.now();
+          console.log(`🔄 Robot${this.id} re-planning return home (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
+          blockStartSimTime = t0;
         }
-        setTimeout(tryStart, 250);
+        setTimeoutSim(tryStart, 0.25);
         return;
       }
-      blockStartTime = null;
+      blockStartSimTime = null;
       replanAttempts = 0;
       logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, recharge)`, 'return-home');
       releaseAgent(agentId);
@@ -2492,7 +2531,7 @@ class ChargingRobot {
       return tl;
     };
 
-    let blockStartTime = null;
+    let blockStartSimTime = null;
     let replanAttempts = 0;
     const tryStart = () => {
       // If a new order arrives before we even start moving, go directly.
@@ -2506,11 +2545,11 @@ class ChargingRobot {
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
       if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (!blockStartTime) blockStartTime = Date.now();
-        const blockedDuration = Date.now() - blockStartTime;
-        if (blockedDuration > 1500) {
-          console.warn(`⚠️ Robot${this.id} force leaving to rest after ${(blockedDuration / 1000).toFixed(1)}s blocked`);
-          blockStartTime = null;
+        if (blockStartSimTime === null) blockStartSimTime = t0;
+        const blockedSimDuration = t0 - blockStartSimTime;
+        if (blockedSimDuration > 1.5) {
+          console.warn(`⚠️ Robot${this.id} force leaving to rest after ${blockedSimDuration.toFixed(1)}s sim blocked`);
+          blockStartSimTime = null;
           replanAttempts = 0;
           logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, rest)`, 'return-rest');
           releaseAgent(agentId);
@@ -2520,15 +2559,15 @@ class ChargingRobot {
           runReturn();
           return;
         }
-        if (blockedDuration > REPLAN_THRESHOLD_MS && replanAttempts < MAX_REPLAN_ATTEMPTS) {
+        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
           replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning return to rest (attempt ${replanAttempts}) after ${(blockedDuration/1000).toFixed(1)}s blocked`);
-          blockStartTime = Date.now();
+          console.log(`🔄 Robot${this.id} re-planning return to rest (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
+          blockStartSimTime = t0;
         }
-        setTimeout(tryStart, 250);
+        setTimeoutSim(tryStart, 0.25);
         return;
       }
-      blockStartTime = null;
+      blockStartSimTime = null;
       replanAttempts = 0;
       logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, rest)`, 'return-rest');
       releaseAgent(agentId);
@@ -3197,7 +3236,7 @@ function createVehicleSequence() {
     const order = orderManager.createOrder();
     if (!order) {
       console.log('⚠️ No available parking spots, waiting...');
-      setTimeout(() => spawnVehicleFromOrder(), 5000);
+      setTimeoutSim(() => spawnVehicleFromOrder(), 5);
       return;
     }
     order.createdAtSimTime = getSimTime(); // 下单时刻（仿真时间），用于计算 wait = 下单到开始充电
@@ -3330,7 +3369,7 @@ function createVehicleSequence() {
 
         // If path is blocked, retry later
         if (isPathBlocked(denseFull, VEHICLE_SPEED, getSimTime(), agentId)) {
-          setTimeout(startEnterAnimation, 250);
+          setTimeoutSim(startEnterAnimation, 0.25);
           return;
         }
 
@@ -3375,7 +3414,7 @@ function createVehicleSequence() {
 
         const tryStartEnter = () => {
           if (isVehicleNearEntryTurn(vehicles, vehicle.slotGroup, vehicle.id)) {
-            setTimeout(tryStartEnter, 300);
+            setTimeoutSim(tryStartEnter, 0.3);
             return;
           }
           startEnterAnimation();
@@ -4054,9 +4093,15 @@ setTimeout(() => {
   console.log(`📊 System status: ${chargingRobots.length} robots, ${batteryStations.length} battery stations`);
   console.log(`🅿️ Total parking spots: ${parkingSpots.length}`);
 
-  // Start auto-cleanup of expired reservations (every 30 seconds)
-  startAutoCleanup(30000);
-  console.log('🧹 Reservation table auto-cleanup started (30s interval)');
+  // Start auto-cleanup of expired reservations using sim-time (every 30 sim-seconds).
+  // At high sim speeds the reservation table would otherwise accumulate thousands of stale
+  // entries between real-time intervals, slowing every isAvailableInRange / isPathBlocked call.
+  const scheduleReservationCleanup = () => {
+    cleanupExpiredReservations();
+    setTimeoutSim(scheduleReservationCleanup, 30);
+  };
+  setTimeoutSim(scheduleReservationCleanup, 30);
+  console.log('🧹 Reservation table auto-cleanup started (30 sim-sec interval)');
 
   // Initialize recording only if enabled via URL params (?record=true&start_time=20&end_time=40)
   if (recordConfig.enabled) {
@@ -4101,11 +4146,13 @@ function animate() {
    simTimeTextEl.textContent = `Sim time  ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 
   // Clean up trajectories for vehicles that have left the lot (removed from vehicles)
-  const activeIds = new Set(vehicles.map(v => v.id));
-  for (const [vid, rec] of vehicleTrajectories.entries()) {
-    if (!activeIds.has(vid)) {
-      if (rec.line) trajectoryGroup.remove(rec.line);
-      vehicleTrajectories.delete(vid);
+  if (vehicleTrajectories.size > 0) {
+    const activeIds = new Set(vehicles.map(v => v.id));
+    for (const [vid, rec] of vehicleTrajectories.entries()) {
+      if (!activeIds.has(vid)) {
+        if (rec.line) trajectoryGroup.remove(rec.line);
+        vehicleTrajectories.delete(vid);
+      }
     }
   }
   // Vehicle offset calibration: show logical-position marker and apply live offset to first vehicle
@@ -4193,6 +4240,10 @@ function animate() {
   vehicles.forEach(vehicle => {
     if (vehicle.chargeportMixer) vehicle.chargeportMixer.update(simDt);
   });
+
+  // Compute once per frame (not per-robot) to avoid O(N×M) work in the robot loop
+  const waitingVehicles = vehicles.filter(v => isVehicleWaitingForCharge(v) && !v.assignedRobotId);
+
   chargingRobots.forEach(robot => {
     if (robot.model?.userData?.mixer) robot.model.userData.mixer.update(simDt);
     // 仅把“在路上移动的机器人”视为动态障碍物；静止状态（充电 / idle / 自充电等）不计入碰撞规避
@@ -4224,7 +4275,6 @@ function animate() {
     }
     // Check if robot should return home to charge
     // Only return home if: low battery, or no vehicles waiting, or all waiting vehicles have demand > robot's battery
-    const waitingVehicles = vehicles.filter(v => isVehicleWaitingForCharge(v) && !v.assignedRobotId);
     const canServeAny = waitingVehicles.some(v => robot.batteryLevel >= (v.chargeDemandKwh ?? 0));
     if (
       robot.state === 'idle' &&
@@ -4390,11 +4440,8 @@ function applySimulatorResize() {
   renderer.setSize(wScale, hScale, false);
   composer.setSize(wScale, hScale);
   composer.setPixelRatio(renderer.getPixelRatio());
-  const ssaoPassResize = composer.passes[1];
-  if (ssaoPassResize && ssaoPassResize.setSize) ssaoPassResize.setSize(wScale, hScale);
-  bloomPass.resolution.set(wScale, hScale);
-  const fxaaPass = composer.passes[3];
-  if (fxaaPass && fxaaPass.setSize) fxaaPass.setSize(wScale, hScale);
+  if (ssaoPass) ssaoPass.setSize(wScale, hScale);
+  if (bloomPass) bloomPass.resolution.set(wScale, hScale);
   renderer.domElement.style.width = w + 'px';
   renderer.domElement.style.height = h + 'px';
 }
