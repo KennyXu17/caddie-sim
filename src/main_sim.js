@@ -1272,20 +1272,50 @@ const MAX_SMOOTH_TIME_SCALE = 8;
 
 // Dashboard 请求跟随机器人时，相机近距离跟随该机器人（?dashboard=1 时有效）
 let followRobotId = null;
+function applySimSpeed(scale) {
+  const raw = Number(scale) || 1;
+  setSimTimeScale(raw);
+  const visualScale = Math.min(Math.max(0.1, raw), MAX_SMOOTH_TIME_SCALE);
+  try {
+    gsap.globalTimeline.timeScale(visualScale);
+  } catch {
+    // gsap may not be initialized yet; ignore
+  }
+}
 if (typeof window !== 'undefined') {
   window.__requestFollowRobot = (id) => { followRobotId = id != null ? id : null; };
-  window.__requestSimSpeed = (scale) => {
-    const raw = Number(scale) || 1;
-    // 逻辑仿真时间：直接使用 raw（内部 setSimTimeScale 自己会限制到 [0.1, 3600]）
-    setSimTimeScale(raw);
-    // 可视动画（GSAP）：使用单独的平滑上限，避免倍速过大导致每帧只看到大跳跃
-    const visualScale = Math.min(Math.max(0.1, raw), MAX_SMOOTH_TIME_SCALE);
-    try {
-      gsap.globalTimeline.timeScale(visualScale);
-    } catch {
-      // gsap may not be initialized yet; ignore
+  window.__requestSimSpeed = (scale) => { applySimSpeed(scale); };
+  // 当仿真在 iframe 中运行时，接收父页面（dashboard）发来的命令
+  window.addEventListener('message', (event) => {
+    const d = event.data;
+    if (!d || typeof d.type !== 'string') return;
+    if (d.type === 'setSimSpeed') {
+      applySimSpeed(d.value);
+    } else if (d.type === 'followRobot') {
+      followRobotId = d.id != null ? d.id : null;
+    } else if (d.type === 'setOrderSettings' && d.opts) {
+      const o = d.opts;
+      if (typeof o.ordersPerHour === 'number' && o.ordersPerHour > 0) ORDER_SETTINGS.ordersPerHour = o.ordersPerHour;
+      if (typeof o.avgDemandKwh === 'number' && o.avgDemandKwh > 0) ORDER_SETTINGS.avgDemandKwh = o.avgDemandKwh;
+      if (typeof o.demandStdKwh === 'number' && o.demandStdKwh > 0) ORDER_SETTINGS.demandStdKwh = o.demandStdKwh;
+      else ORDER_SETTINGS.demandStdKwh = Math.max(1, ORDER_SETTINGS.avgDemandKwh * 0.25);
+    } else if (d.type === 'setChargeSettings' && d.opts) {
+      const o = d.opts;
+      const prevCap = ROBOT_BATTERY_KWH;
+      if (typeof o.robotBatteryKwh === 'number' && o.robotBatteryKwh > 0) {
+        CHARGE_SETTINGS.robotBatteryKwh = o.robotBatteryKwh;
+        ROBOT_BATTERY_KWH = o.robotBatteryKwh;
+        LOW_BATTERY_KWH = ROBOT_BATTERY_KWH * 0.25;
+        if (prevCap > 0) {
+          const scale = ROBOT_BATTERY_KWH / prevCap;
+          chargingRobots.forEach((r) => {
+            r.batteryLevel = Math.min(ROBOT_BATTERY_KWH, r.batteryLevel * scale);
+          });
+        }
+      }
+      if (typeof o.cRate === 'number' && o.cRate > 0) CHARGE_SETTINGS.cRate = o.cRate;
     }
-  };
+  });
 }
 const FOLLOW_OFFSET_UP = 10;
 const FOLLOW_OFFSET_BACK = 14;
@@ -4227,19 +4257,19 @@ function animate() {
   }
   controls.update();
 
-  // Push state to dashboard when embedded (?dashboard=1). Throttled and deferred so
-  // React setState does not run inside rAF and block the next frame (reduces stutter).
-  if (typeof window.__dashboardSetState === 'function') {
+  // 推送到 dashboard：iframe 内用 postMessage（不抢主线程），同页内用 __dashboardSetState
+  const inIframe = typeof window !== 'undefined' && window !== window.top;
+  const hasDashboard = inIframe || typeof window.__dashboardSetState === 'function';
+  if (hasDashboard) {
     dashboardTick++;
-    if (dashboardTick % 60 === 0) {
-      const setState = window.__dashboardSetState;
+    const DASHBOARD_PUSH_INTERVAL = 90;
+    if (dashboardTick % DASHBOARD_PUSH_INTERVAL === 0) {
       const orders = orderManager.orders;
       const robots = chargingRobots;
       const veh = vehicles;
       const getTime = getSimTime;
       const totalKwh = totalKwhDelivered;
-      setTimeout(() => {
-        if (typeof setState !== 'function') return;
+      const runPush = () => {
         const completed = orders.filter(o => o.status === 'completed').length;
         const vehiclesBeingCharged = new Set(robots.filter(r => r.state === 'charging' && r.targetVehicle).map(r => r.targetVehicle.id));
         const waiting = veh.filter(v => v.phase === 'parked' && v.needsCharging && !vehiclesBeingCharged.has(v.id)).length;
@@ -4263,7 +4293,7 @@ function animate() {
         });
         const waitValues = orderDetails.map(o => o.waitTimeSec).filter(w => w != null && !Number.isNaN(w));
         const avgWaitSec = waitValues.length ? waitValues.reduce((s, w) => s + w, 0) / waitValues.length : 0;
-        setState({
+        const state = {
           simTimeSec: getTime(),
           fleetSummary: {
             total: robots.length,
@@ -4290,8 +4320,18 @@ function animate() {
           },
           totalKwhDelivered: totalKwh,
           orderDetails,
-        });
-      }, 0);
+        };
+        if (inIframe) {
+          window.parent.postMessage({ type: 'simState', payload: state }, '*');
+        } else if (typeof window.__dashboardSetState === 'function') {
+          window.__dashboardSetState(state);
+        }
+      };
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(runPush, { timeout: 100 });
+      } else {
+        setTimeout(runPush, 0);
+      }
     }
   }
 
@@ -4326,6 +4366,14 @@ function applySimulatorResize() {
 }
 window.addEventListener('resize', applySimulatorResize);
 if (window.__simulatorContainer) {
-  const ro = new ResizeObserver(applySimulatorResize);
+  let resizeDebounce = null;
+  const debouncedResize = () => {
+    if (resizeDebounce) clearTimeout(resizeDebounce);
+    resizeDebounce = setTimeout(() => {
+      resizeDebounce = null;
+      applySimulatorResize();
+    }, 150);
+  };
+  const ro = new ResizeObserver(debouncedResize);
   ro.observe(window.__simulatorContainer);
 }
