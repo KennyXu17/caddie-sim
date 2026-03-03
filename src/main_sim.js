@@ -1266,17 +1266,22 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(-0.36, 6.91, -7.69);
 controls.update();
 
+// 倍速过高时，每帧 GSAP 推进的动画时间过多，渲染只有“跳跃”没有中间帧，看起来卡顿。
+// 逻辑仿真时间仍然允许更高倍速，但可视动画（GSAP）使用单独的上限保证流畅。
+const MAX_SMOOTH_TIME_SCALE = 8;
+
 // Dashboard 请求跟随机器人时，相机近距离跟随该机器人（?dashboard=1 时有效）
 let followRobotId = null;
 if (typeof window !== 'undefined') {
   window.__requestFollowRobot = (id) => { followRobotId = id != null ? id : null; };
   window.__requestSimSpeed = (scale) => {
-    const s = Number(scale) || 1;
-    // Update logical sim time scale (reservations, logs, exporters)
-    setSimTimeScale(s);
-    // Also speed up / slow down all GSAP timelines so visual motion matches sim speed
+    const raw = Number(scale) || 1;
+    // 逻辑仿真时间：直接使用 raw（内部 setSimTimeScale 自己会限制到 [0.1, 3600]）
+    setSimTimeScale(raw);
+    // 可视动画（GSAP）：使用单独的平滑上限，避免倍速过大导致每帧只看到大跳跃
+    const visualScale = Math.min(Math.max(0.1, raw), MAX_SMOOTH_TIME_SCALE);
     try {
-      gsap.globalTimeline.timeScale(s);
+      gsap.globalTimeline.timeScale(visualScale);
     } catch {
       // gsap may not be initialized yet; ignore
     }
