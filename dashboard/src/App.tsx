@@ -1,21 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ThemeProvider, CssBaseline, Box, Paper, Typography, Button } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import StopIcon from '@mui/icons-material/Stop';
 import { dashboardTheme } from './theme';
 import { FleetStatusCards } from './components/FleetStatusCards';
 import { SOCPanel } from './components/SOCPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { OrderStatsPanel } from './components/OrderStatsPanel';
-import type { FleetStatusCardsHandle } from './components/FleetStatusCards';
-import type { SOCPanelHandle } from './components/SOCPanel';
-import type { OrderStatsPanelHandle } from './components/OrderStatsPanel';
 import type { SimulatorState } from './types';
+
+/** 仿真页 URL：独立页面只跑 Three.js，与 dashboard 完全分离的主线程 */
+const SIM_URL = typeof window !== 'undefined' ? new URL('/', window.location.href).href : '';
 
 declare global {
   interface Window {
-    __dashboardSetState?: ((state: SimulatorState) => void) | null;
-    // Sim control functions — set here to forward postMessage to the sim popup window
     __requestSimSpeed?: (scale: number) => void;
     __requestFollowRobot?: (id: number | null) => void;
     __setOrderSettings?: (opts: { ordersPerHour?: number; avgDemandKwh?: number }) => void;
@@ -23,101 +21,123 @@ declare global {
   }
 }
 
-// URL of the standalone simulator page (Three.js only, no React)
-const SIM_URL = '/';
-
 export default function App() {
-  const centerAreaRef = useRef<HTMLDivElement>(null);
+  const simPanelRef = useRef<HTMLDivElement>(null);
   const simWindowRef = useRef<Window | null>(null);
+  const checkClosedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [simRunning, setSimRunning] = useState(false);
+  const [simState, setSimState] = useState<SimulatorState | null>(null);
 
-  const fleetRef = useRef<FleetStatusCardsHandle>(null);
-  const socRef = useRef<SOCPanelHandle>(null);
-  const statsRef = useRef<OrderStatsPanelHandle>(null);
-
-  // Receive sim state from the popup window via postMessage.
-  // Completely decoupled from React state — update DOM directly.
+  // Receive state from simulator popup
   useEffect(() => {
-    const handleMessage = (e: MessageEvent) => {
-      if (!e.data || typeof e.data !== 'object') return;
-      if (e.data.type === 'simState') {
-        const state = e.data.payload as SimulatorState;
-        fleetRef.current?.update(state.orderDetails ?? null);
-        socRef.current?.update(state.robots ?? null);
-        statsRef.current?.update(state);
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'simState' && event.data.payload != null) {
+        setSimState(event.data.payload as SimulatorState);
       }
     };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
   }, []);
 
-  // Poll every second to detect if the popup was closed externally
+  // Wire up command helpers to send postMessage to popup window
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (simWindowRef.current?.closed) {
-        simWindowRef.current = null;
-        setSimRunning(false);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
+    const post = (msg: object) => {
+      const win = simWindowRef.current;
+      if (win && !win.closed) win.postMessage(msg, '*');
+    };
+    window.__requestSimSpeed = (scale: number) => post({ type: 'setSimSpeed', value: scale });
+    window.__requestFollowRobot = (id: number | null) => post({ type: 'followRobot', id });
+    window.__setOrderSettings = (opts) => post({ type: 'setOrderSettings', opts });
+    window.__setChargeSettings = (opts) => post({ type: 'setChargeSettings', opts });
+    return () => {
+      window.__requestSimSpeed = undefined;
+      window.__requestFollowRobot = undefined;
+      window.__setOrderSettings = undefined;
+      window.__setChargeSettings = undefined;
+    };
   }, []);
 
-  const openSimulator = () => {
-    // If the popup is already open, just bring it to focus
+  const openSimulator = useCallback(() => {
+    const el = simPanelRef.current;
+    if (!el) return;
+
+    // Close existing popup first
     if (simWindowRef.current && !simWindowRef.current.closed) {
-      simWindowRef.current.focus();
+      simWindowRef.current.close();
+    }
+    if (checkClosedTimerRef.current) {
+      clearInterval(checkClosedTimerRef.current);
+      checkClosedTimerRef.current = null;
+    }
+
+    // Compute popup position to exactly match the panel's screen coordinates
+    const rect = el.getBoundingClientRect();
+    const left = Math.round(window.screenX + rect.left);
+    const top = Math.round(window.screenY + rect.top);
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+
+    const features = [
+      'popup=yes',
+      `left=${left}`,
+      `top=${top}`,
+      `width=${width}`,
+      `height=${height}`,
+      'toolbar=no',
+      'menubar=no',
+      'status=no',
+      'location=no',
+      'scrollbars=no',
+      'resizable=yes',
+    ].join(',');
+
+    const win = window.open(SIM_URL, 'caddie-sim', features);
+    if (!win) {
+      alert('弹窗被拦截，请在浏览器中允许此页面弹出新窗口后再试。');
       return;
     }
 
-    // Calculate screen coordinates of the center area so the popup fills it exactly
-    const rect = centerAreaRef.current?.getBoundingClientRect();
-    // Compensate for browser chrome (tab bar + address bar) using outerHeight vs innerHeight
-    const chromeTop = window.outerHeight - window.innerHeight;
-    const chromeLeft = window.outerWidth - window.innerWidth;
-    const left = Math.round(window.screenX + chromeLeft + (rect?.left ?? 0));
-    const top = Math.round(window.screenY + chromeTop + (rect?.top ?? 0));
-    const width = Math.round(rect?.width ?? 900);
-    const height = Math.round(rect?.height ?? 600);
-
-    const simWin = window.open(
-      SIM_URL,
-      'caddie-sim-window',
-      `width=${width},height=${height},left=${left},top=${top},` +
-        'menubar=no,toolbar=no,location=no,status=no,resizable=yes',
-    );
-
-    if (!simWin) {
-      alert('Pop-up blocked — please allow pop-ups for this site and try again.');
-      return;
-    }
-
-    simWindowRef.current = simWin;
+    simWindowRef.current = win;
     setSimRunning(true);
 
-    // Forward control commands from dashboard panels to the sim popup via postMessage.
-    // SettingsPanel and SOCPanel call these window-level functions when the user
-    // changes settings or clicks a robot — we intercept and relay to the sim window.
-    window.__requestSimSpeed = (scale) =>
-      simWindowRef.current?.postMessage({ type: 'setSimSpeed', value: scale }, '*');
-    window.__requestFollowRobot = (id) =>
-      simWindowRef.current?.postMessage({ type: 'followRobot', id }, '*');
-    window.__setOrderSettings = (opts) =>
-      simWindowRef.current?.postMessage({ type: 'setOrderSettings', opts }, '*');
-    window.__setChargeSettings = (opts) =>
-      simWindowRef.current?.postMessage({ type: 'setChargeSettings', opts }, '*');
-  };
+    // Watch for popup being closed by the user
+    checkClosedTimerRef.current = setInterval(() => {
+      if (simWindowRef.current?.closed) {
+        setSimRunning(false);
+        setSimState(null);
+        simWindowRef.current = null;
+        if (checkClosedTimerRef.current) {
+          clearInterval(checkClosedTimerRef.current);
+          checkClosedTimerRef.current = null;
+        }
+      }
+    }, 800);
+  }, []);
+
+  const stopSimulator = useCallback(() => {
+    if (simWindowRef.current && !simWindowRef.current.closed) {
+      simWindowRef.current.close();
+    }
+    simWindowRef.current = null;
+    setSimRunning(false);
+    setSimState(null);
+    if (checkClosedTimerRef.current) {
+      clearInterval(checkClosedTimerRef.current);
+      checkClosedTimerRef.current = null;
+    }
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (checkClosedTimerRef.current) clearInterval(checkClosedTimerRef.current);
+    };
+  }, []);
 
   return (
     <ThemeProvider theme={dashboardTheme}>
       <CssBaseline />
-      <Box
-        sx={{
-          minHeight: '100vh',
-          bgcolor: 'background.default',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
+      <Box sx={{ minHeight: '100vh', bgcolor: 'background.default', display: 'flex', flexDirection: 'column' }}>
         {/* Header */}
         <Paper
           elevation={0}
@@ -137,8 +157,8 @@ export default function App() {
               width: 8,
               height: 8,
               borderRadius: '50%',
-              bgcolor: simRunning ? 'success.main' : 'text.disabled',
-              animation: simRunning ? 'pulse 1.5s ease-in-out infinite' : 'none',
+              bgcolor: simRunning ? 'success.main' : 'primary.main',
+              animation: 'pulse 1.5s ease-in-out infinite',
               '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.4 } },
             }}
           />
@@ -148,6 +168,30 @@ export default function App() {
           <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
             Fleet monitoring
           </Typography>
+          <Box sx={{ flex: 1 }} />
+          {simRunning ? (
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              startIcon={<StopIcon />}
+              onClick={stopSimulator}
+              sx={{ fontFamily: 'JetBrains Mono', fontSize: 12 }}
+            >
+              Stop Simulation
+            </Button>
+          ) : (
+            <Button
+              size="small"
+              variant="contained"
+              color="primary"
+              startIcon={<PlayArrowIcon />}
+              onClick={openSimulator}
+              sx={{ fontFamily: 'JetBrains Mono', fontSize: 12 }}
+            >
+              Run Simulation
+            </Button>
+          )}
         </Paper>
 
         {/* Main grid */}
@@ -163,123 +207,95 @@ export default function App() {
             height: 'calc(100vh - 65px)',
           }}
         >
-          {/* Left panel — order list */}
+          {/* Left panel */}
           <Paper
             elevation={0}
-            sx={{
-              p: 1.5,
-              gridRow: '1 / -1',
-              display: 'flex',
-              flexDirection: 'column',
-              minHeight: 0,
-              bgcolor: 'background.paper',
-            }}
+            sx={{ p: 1.5, gridRow: '1 / -1', display: 'flex', flexDirection: 'column', minHeight: 0, bgcolor: 'background.paper' }}
           >
-            <FleetStatusCards ref={fleetRef} />
+            <FleetStatusCards orderDetails={simState?.orderDetails} />
           </Paper>
 
-          {/* Center — simulation viewport placeholder */}
+          {/* Center: simulation area placeholder */}
           <Paper
             elevation={0}
-            ref={centerAreaRef}
-            sx={{
-              gridColumn: 2,
-              gridRow: 1,
-              minHeight: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              overflow: 'hidden',
-              bgcolor: 'background.default',
-              border: '1px solid',
-              borderColor: 'divider',
-              position: 'relative',
-            }}
+            sx={{ gridColumn: 2, gridRow: 1, minHeight: 0, display: 'flex', flexDirection: 'column', p: 0, overflow: 'hidden', bgcolor: 'background.paper' }}
           >
-            {simRunning ? (
-              /* Sim is running in a separate window */
-              <Box sx={{ textAlign: 'center', opacity: 0.55 }}>
-                <Typography
-                  variant="caption"
-                  display="block"
-                  color="text.secondary"
-                  fontFamily="JetBrains Mono"
-                  sx={{ mb: 1.5 }}
-                >
-                  Simulation running in a separate window
-                </Typography>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<OpenInNewIcon />}
-                  onClick={openSimulator}
-                  sx={{ fontFamily: 'JetBrains Mono', fontSize: '0.7rem' }}
-                >
-                  Focus Simulator
-                </Button>
-              </Box>
-            ) : (
-              /* Not started yet */
-              <Box sx={{ textAlign: 'center' }}>
-                <Typography
-                  variant="caption"
-                  display="block"
-                  color="text.secondary"
-                  fontFamily="JetBrains Mono"
-                  sx={{ mb: 2, fontSize: '0.75rem' }}
-                >
-                  Simulator not running
-                </Typography>
-                <Button
-                  variant="contained"
-                  size="large"
-                  startIcon={<PlayArrowIcon />}
-                  onClick={openSimulator}
-                  sx={{ fontFamily: 'JetBrains Mono', fontWeight: 600 }}
-                >
-                  Run Simulation
-                </Button>
-                <Typography
-                  variant="caption"
-                  display="block"
-                  color="text.secondary"
-                  sx={{ mt: 1.5, fontSize: '0.65rem', opacity: 0.6 }}
-                >
-                  Opens in a separate window — each has its own main thread
-                </Typography>
-              </Box>
-            )}
+            <Box
+              ref={simPanelRef}
+              sx={{
+                width: '100%',
+                height: '100%',
+                minHeight: 400,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                bgcolor: '#0d1117',
+                gap: 2,
+              }}
+            >
+              {simRunning ? (
+                <>
+                  <Box
+                    sx={{
+                      width: 12,
+                      height: 12,
+                      borderRadius: '50%',
+                      bgcolor: 'success.main',
+                      animation: 'pulse 1.5s ease-in-out infinite',
+                      '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.4 } },
+                    }}
+                  />
+                  <Typography variant="body2" color="text.secondary" fontFamily="JetBrains Mono">
+                    Simulation running in separate window
+                  </Typography>
+                  <Button size="small" variant="text" onClick={openSimulator} sx={{ fontSize: 11, color: 'text.disabled' }}>
+                    Re-open window
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Typography variant="body2" color="text.disabled" fontFamily="JetBrains Mono" sx={{ mb: 1 }}>
+                    Simulation not running
+                  </Typography>
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    size="large"
+                    startIcon={<PlayArrowIcon />}
+                    onClick={openSimulator}
+                    sx={{ fontFamily: 'JetBrains Mono' }}
+                  >
+                    Run Simulation
+                  </Button>
+                  <Typography variant="caption" color="text.disabled" sx={{ mt: 1, textAlign: 'center', maxWidth: 260 }}>
+                    Simulator runs in a dedicated window for smooth rendering
+                  </Typography>
+                </>
+              )}
+            </Box>
           </Paper>
 
-          {/* Right panel — robot status + settings */}
+          {/* Right panel */}
           <Paper
             elevation={0}
-            sx={{
-              p: 1.5,
-              gridRow: '1 / -1',
-              minHeight: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              overflow: 'auto',
-              bgcolor: 'background.paper',
-            }}
+            sx={{ p: 1.5, gridRow: '1 / -1', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto', bgcolor: 'background.paper' }}
           >
-            <SOCPanel ref={socRef} />
+            <SOCPanel robots={simState?.robots} />
             <SettingsPanel />
           </Paper>
 
-          {/* Bottom center — financial metrics */}
+          {/* Bottom stats */}
           <Paper
             elevation={0}
-            sx={{
-              gridColumn: 2,
-              gridRow: 2,
-              p: 1.5,
-              bgcolor: 'background.paper',
-            }}
+            sx={{ gridColumn: 2, gridRow: 2, p: 1.5, bgcolor: 'background.paper' }}
           >
-            <OrderStatsPanel ref={statsRef} />
+            <OrderStatsPanel
+              orderStats={simState?.orderStats}
+              totalKwhDelivered={simState?.totalKwhDelivered}
+              simTimeSec={simState?.simTimeSec}
+              orderDetails={simState?.orderDetails}
+            />
           </Paper>
         </Box>
       </Box>
