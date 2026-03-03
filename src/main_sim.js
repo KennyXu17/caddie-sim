@@ -3474,9 +3474,13 @@ function createVehicleSequence() {
       scheduleNextOrder();
     }, delay);
   }
-  
-  // 启动订单生成
-  setTimeout(() => scheduleNextOrder(), 5000); // 5秒后开始
+
+  // 第一辆车：短延迟后立即出现；之后按 ordersPerHour 间隔由 scheduleNextOrder 生成
+  const firstVehicleDelayMs = 1500;
+  setTimeout(() => {
+    if (vehicles.length < 10) spawnVehicleFromOrder();
+    scheduleNextOrder();
+  }, firstVehicleDelayMs);
 }
 
 function totalDemandKwh() {
