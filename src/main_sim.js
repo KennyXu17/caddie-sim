@@ -1784,8 +1784,12 @@ class ChargingRobot {
           mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
         }
       } else {
+        // 移动方向必须与 edge 一致：即使不单独做旋转动画，也先设好朝向再移动
+        if (len >= MIN_SEG_LEN_FOR_ROTATE) {
+          mainTl.set(this.model.rotation, { y: angleNorm });
+          trackedHeading = angleNorm;
+        }
         mainTl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
-        if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
       }
       return true;
     };
@@ -2087,13 +2091,17 @@ class ChargingRobot {
 
     tl.to({}, { duration: 3 }); // Wait for navigation
 
-    // Rotate to home orientation (shortest path)
+    // Rotate to C_i_0 charge pose (same as when charging a vehicle)
     tl.call(() => {
       const currentNorm = normalizeAngleToMinusPiPi(this.model.rotation?.y ?? 0);
       this.model.rotation.y = currentNorm;
+      const targetY = this.homeSpot
+        ? ((this.homeSpot.opening === '+z') ? ROBOT_ROT_EXTRA : (Math.PI + ROBOT_ROT_EXTRA))
+        : Math.PI;
+      this._returnHomeTargetRotation = targetY;
     });
     tl.to(this.model.rotation, {
-      y: Math.PI,
+      y: () => this._returnHomeTargetRotation ?? Math.PI,
       duration: 0.8,
       ease: "power1.inOut"
     });
@@ -2165,8 +2173,11 @@ class ChargingRobot {
           tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
         }
       } else {
+        if (len >= MIN_SEG_LEN_FOR_ROTATE) {
+          tl.set(this.model.rotation, { y: angleNorm });
+          trackedHeading = angleNorm;
+        }
         tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
-        if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
       }
       return true;
     };
@@ -2348,8 +2359,11 @@ class ChargingRobot {
           tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" }, '<');
         }
       } else {
+        if (len >= MIN_SEG_LEN_FOR_ROTATE) {
+          tl.set(this.model.rotation, { y: angleNorm });
+          trackedHeading = angleNorm;
+        }
         tl.to(this.model.position, { x: to.x, z: to.z, y: ROBOT_Y_OFFSET, duration: dur, ease: "none" });
-        if (len >= MIN_SEG_LEN_FOR_ROTATE) trackedHeading = angleNorm;
       }
         // If a new order arrives while returning to rest, reroute at the next node.
         tl.call(() => {
@@ -2650,7 +2664,10 @@ robotPositions.forEach((pos, idx) => {
       const robotModel = gltf.scene;
       robotModel.scale.set(.9, .9, .9);
       robotModel.position.set(pos.x, pos.y, pos.z);
-      robotModel.rotation.y = Math.PI;  // heading 180° (South)
+      // C_i_0 上的朝向与给车辆充电时一致：根据车位开口 (+z/-z) 决定
+      const homeSpot = robotHomeSpots[idx];
+      const chargeHeadingAtHome = homeSpot ? ((homeSpot.opening === '+z') ? ROBOT_ROT_EXTRA : (Math.PI + ROBOT_ROT_EXTRA)) : Math.PI;
+      robotModel.rotation.y = chargeHeadingAtHome;
       const mixer = new THREE.AnimationMixer(robotModel);
       robotModel.userData.mixer = mixer;
       robotModel.userData.animations = gltf.animations || [];
@@ -2757,7 +2774,9 @@ robotPositions.forEach((pos, idx) => {
           const robotModel = gltf.scene;
           robotModel.scale.set(0.75, 0.75, 0.75);
           robotModel.position.set(pos.x, pos.y, pos.z);
-          robotModel.rotation.y = Math.PI;  // heading 180° (South)
+          const homeSpot = robotHomeSpots[idx];
+          const chargeHeadingAtHome = homeSpot ? ((homeSpot.opening === '+z') ? ROBOT_ROT_EXTRA : (Math.PI + ROBOT_ROT_EXTRA)) : Math.PI;
+          robotModel.rotation.y = chargeHeadingAtHome;
           robotModel.traverse((obj) => {
             if (obj.isMesh) obj.castShadow = true;
           });
