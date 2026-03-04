@@ -47,18 +47,25 @@ class AStarPathfinder {
 // === 碰撞避免系统 ===
 class CollisionAvoidance {
   constructor() {
-    this.occupiedPositions = [];
+    /** Map<id, entry> — 替代数组，addOccupied / removeOccupied 均为 O(1)，无 GC */
+    this._occupiedMap = new Map();
     this.reservedPaths = [];
   }
 
+  // 向后兼容：部分外部代码可能读取 .occupiedPositions
+  get occupiedPositions() {
+    return Array.from(this._occupiedMap.values());
+  }
+
   addOccupiedPosition(position, id, agentType = 'caddie') {
-    const radius = agentType === 'car' ? CAR_COLLISION_RADIUS : (Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2);
-    this.removeOccupiedPosition(id);
-    this.occupiedPositions.push({ ...position, id, agentType, radius, timestamp: Date.now() });
+    const radius = agentType === 'car'
+      ? CAR_COLLISION_RADIUS
+      : (Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2);
+    this._occupiedMap.set(id, { ...position, id, agentType, radius });
   }
 
   removeOccupiedPosition(id) {
-    this.occupiedPositions = this.occupiedPositions.filter(pos => pos.id !== id);
+    this._occupiedMap.delete(id);
   }
 
   reservePath(path, id, duration) {
@@ -69,9 +76,9 @@ class CollisionAvoidance {
   }
 
   checkPathConflict(path, excludeId = null, pathAgentType = 'car') {
-    const carRadius = CAR_COLLISION_RADIUS;
-    const caddieRadius = Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2;
-    const pathRadius = pathAgentType === 'car' ? carRadius : caddieRadius;
+    const carRadius     = CAR_COLLISION_RADIUS;
+    const caddieRadius  = Math.sqrt((1.5 / 2) ** 2 + (0.8 / 2) ** 2) + 0.2;
+    const pathRadius    = pathAgentType === 'car' ? carRadius : caddieRadius;
     for (const reserved of this.reservedPaths) {
       if (reserved.id === excludeId) continue;
       const reservedRadius = reserved.id.startsWith('vehicle_') ? carRadius : caddieRadius;
@@ -89,9 +96,11 @@ class CollisionAvoidance {
 
   getOccupiedPositions(excludeId = null, alsoExcludeIds = []) {
     const excludeSet = new Set([excludeId, ...alsoExcludeIds].filter(Boolean));
-    return this.occupiedPositions
-      .filter(pos => !excludeSet.has(pos.id))
-      .map(pos => ({ x: pos.x, z: pos.z, radius: pos.radius }));
+    const result = [];
+    for (const [id, pos] of this._occupiedMap) {
+      if (!excludeSet.has(id)) result.push({ x: pos.x, z: pos.z, radius: pos.radius });
+    }
+    return result;
   }
 }
 

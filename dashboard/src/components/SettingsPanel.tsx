@@ -34,17 +34,22 @@ const C_RATE_OPTIONS      = [1, 2, 5, 10];
 const ROBOT_BATTERY_OPTIONS = [100, 200, 400];
 
 const QUALITY_LABELS: Record<RenderQuality, string> = {
-  low:    'Low  – fastest',
-  medium: 'Medium  – balanced',
-  high:   'High  – best quality',
+  low:    'Low  – 60fps on any GPU',
+  medium: 'Medium  – default (fast iGPU)',
+  high:   'High  – SSAO, needs dGPU',
+  ultra:  'Ultra  – full effects + Retina',
   custom: 'Custom',
 };
 
 const SSAA_OPTIONS  = [{ label: '1× (native)', value: 1 }, { label: '1.5×', value: 1.5 }, { label: '2× (4K-equiv)', value: 2 }];
 const SHADOW_OPTIONS = [
-  { label: '1024  (fast)',   value: 1024 },
-  { label: '2048  (good)',   value: 2048 },
-  { label: '4096  (sharp)',  value: 4096 },
+  { label: '512   (fastest)',  value: 512  },
+  { label: '1024  (default)', value: 1024 },
+  { label: '2048  (sharp)',   value: 2048 },
+];
+const DPR_OPTIONS = [
+  { label: '1×  logical px (fast)', value: 1 },
+  { label: '2×  Retina / HiDPI',   value: 2 },
 ];
 
 // ── Props ───────────────────────────────────────────────────────────────────
@@ -128,7 +133,7 @@ export function SettingsPanel({
                 if (q !== 'custom') applyPreset(q);
               }}
             >
-              {(['low', 'medium', 'high', 'custom'] as RenderQuality[]).map((q) => (
+              {(['low', 'medium', 'high', 'ultra', 'custom'] as RenderQuality[]).map((q) => (
                 <MenuItem key={q} value={q} disabled={q === 'custom' && renderConfig.quality !== 'custom'}>
                   {QUALITY_LABELS[q]}
                 </MenuItem>
@@ -172,7 +177,7 @@ export function SettingsPanel({
 
           {/* SSAO + Bloom toggles */}
           <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 0.5 }}>
-            <Tooltip title="Screen-Space Ambient Occlusion — adds contact shadows. High GPU cost." placement="left" arrow>
+            <Tooltip title="Screen-Space Ambient Occlusion — contact shadow detail. ⚠ High GPU cost." placement="left" arrow>
               <FormControlLabel
                 control={
                   <Switch
@@ -201,6 +206,23 @@ export function SettingsPanel({
               />
             </Tooltip>
           </Box>
+
+          {/* Device pixel ratio */}
+          <Tooltip title="Pixel ratio: 2× (Retina) renders 4× more pixels — massive GPU cost. Use 1× unless you need crisp screenshots." placement="left" arrow>
+            <FormControl size="small" fullWidth>
+              <InputLabel id="dpr-label">Pixel ratio (DPR)</InputLabel>
+              <Select
+                labelId="dpr-label"
+                value={renderConfig.dpr}
+                label="Pixel ratio (DPR)"
+                onChange={(e) => patchRender({ dpr: Number(e.target.value) })}
+              >
+                {DPR_OPTIONS.map((o) => (
+                  <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Tooltip>
 
           {/* Run / Restart button */}
           <Button

@@ -22,10 +22,12 @@ declare global {
 /** Build the simulator popup URL, embedding render config as query params. */
 function buildSimUrl(rc: RenderConfig): string {
   const base = new URL('/', window.location.href);
+  base.searchParams.set('quality', rc.quality === 'custom' ? 'medium' : rc.quality);
   base.searchParams.set('ssaa',   String(rc.ssaa));
   base.searchParams.set('shadow', String(rc.shadowRes));
   base.searchParams.set('ssao',   rc.ssao  ? '1' : '0');
   base.searchParams.set('bloom',  rc.bloom ? '1' : '0');
+  base.searchParams.set('dpr',    String(rc.dpr));
   return base.href;
 }
 

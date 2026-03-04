@@ -50,9 +50,15 @@ import {
 if (typeof window !== 'undefined') window.STEERING_CONFIG = STEERING_CONFIG;
 
 // Helper: schedule callback after given SIM-TIME seconds (converted using current sim speed).
+// Minimum real-time interval (ms) for setTimeoutSim.
+// Prevents event-loop flooding at high simulation speeds:
+//   e.g. pollMs=120 at 60× → 2ms real → 500 callbacks/sec per gate wait → main-thread stall.
+// 16ms ≈ one rAF frame; robots waiting at gates poll at most once per rendered frame.
+const _SIM_TIMEOUT_MIN_MS = 16;
+
 function setTimeoutSim(fn, simSeconds) {
   const scale = Math.max(0.1, getSimTimeScale());
-  const delayMs = (simSeconds / scale) * 1000;
+  const delayMs = Math.max(_SIM_TIMEOUT_MIN_MS, (simSeconds / scale) * 1000);
   return setTimeout(fn, delayMs);
 }
 
@@ -226,9 +232,6 @@ function getVehicleExitPathNodes(slotIndex, slotCenter = null) {
 // Maximum wait time before forcing resume (deadlock prevention)
 const GATE_TIMEOUT_MS = 15000;
 
-// Dynamic re-planning threshold in SIM seconds (speed-invariant)
-const REPLAN_THRESHOLD_SIM_SEC = 5;
-const MAX_REPLAN_ATTEMPTS = 3;
 
 function addGateWaitAtPoint(tl, x, z, agentId, holdSec = 0.8, pollMs = 200) {
   if (!tl) return;
@@ -483,11 +486,8 @@ function isOccupiedPhysically(x, z, excludeAgentId = null, radius = 1.0) {
 
 function isVehicleNearPhysically(x, z, radius = 1.5) {
   const r2 = radius * radius;
-  for (const v of vehicles) {
-    if (!v?.model?.position || v.phase === 'gone') continue;
-    if (v.phase === 'parked') continue;
-    const dx = v.model.position.x - x;
-    const dz = v.model.position.z - z;
+  for (const v of _movingVehicles) {
+    const dx = v.model.position.x - x, dz = v.model.position.z - z;
     if (dx * dx + dz * dz <= r2) return true;
   }
   return false;
@@ -496,12 +496,11 @@ function isVehicleNearPhysically(x, z, radius = 1.5) {
 /** 仅检查是否有其他机器人在 (x,z) 半径内（不含 excludeAgentId） */
 function isRobotAtPosition(x, z, excludeAgentId = null, radius = 1.0) {
   const r2 = radius * radius;
+  // Uses full chargingRobots (including idle) so parked robots block approach to charging spots.
   for (const rb of chargingRobots) {
     if (!rb?.model?.position) continue;
-    const id = `robot_${rb.id}`;
-    if (excludeAgentId && id === excludeAgentId) continue;
-    const dx = rb.model.position.x - x;
-    const dz = rb.model.position.z - z;
+    if (excludeAgentId && `robot_${rb.id}` === excludeAgentId) continue;
+    const dx = rb.model.position.x - x, dz = rb.model.position.z - z;
     if (dx * dx + dz * dz <= r2) return true;
   }
   return false;
@@ -565,21 +564,14 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
     return null;
   };
 
-  for (const rb of chargingRobots) {
-    if (!rb?.model?.position) continue;
-    // 仅把“在路上移动的机器人”（navigating / returning）作为 2 秒轨迹预测中的动态障碍；
-    // 停在充电位 / C_i_0 / home 的静止机器人不参与 swept-volume 预测，由上层静态占用逻辑处理。
-    if (rb.state !== 'navigating' && rb.state !== 'returning') continue;
+  // Use per-frame caches: only moving entities participate in swept-volume prediction.
+  for (const rb of _movingRobots) {
     const otherId = `robot_${rb.id}`;
     const heading = rb.model.rotation?.y ?? 0;
     const blocker = checkOther(rb.model.position, otherId, false, heading, ROBOT_CAPSULE_HALFLEN, ROBOT_CAPSULE_R);
     if (blocker) return { clear: false, blocker };
   }
-  for (const v of vehicles) {
-    if (!v?.model?.position || v.phase === 'gone') continue;
-    // Ignore vehicles that are fully parked in slots; only treat moving/entering/leaving
-    // vehicles as dynamic obstacles for robot path prediction.
-    if (v.phase === 'parked') continue;
+  for (const v of _movingVehicles) {
     const otherId = `vehicle_${v.id}`;
     const heading = v.model.rotation?.y ?? 0;
     const blocker = checkOther(v.model.position, otherId, true, heading, VEHICLE_CAPSULE_HALFLEN, VEHICLE_CAPSULE_R);
@@ -588,17 +580,13 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
   return { clear: true };
 }
 
-/** 返回第一个在 (x,z) 半径内的其他机器人 */
+/** 返回第一个在 (x,z) 半径内的其他移动机器人（使用每帧缓存） */
 function getBlockerRobotAt(x, z, excludeAgentId, radius = 1.0) {
   const r2 = radius * radius;
-  for (const rb of chargingRobots) {
-    if (!rb?.model?.position) continue;
-    // 仅把“在路上移动的机器人”（navigating/returning）视为阻挡，静止在 C_i_0 或充电/idle 的机器人不作为物理障碍
-    if (rb.state !== 'navigating' && rb.state !== 'returning') continue;
+  for (const rb of _movingRobots) {
     const id = `robot_${rb.id}`;
     if (excludeAgentId && id === excludeAgentId) continue;
-    const dx = rb.model.position.x - x;
-    const dz = rb.model.position.z - z;
+    const dx = rb.model.position.x - x, dz = rb.model.position.z - z;
     if (dx * dx + dz * dz <= r2) return { pos: rb.model.position, agentId: id };
   }
   return null;
@@ -1072,11 +1060,16 @@ camera.position.set(-0.56, 20.38, 21.26);
 const _renderConfig = (() => {
   try {
     const p = new URLSearchParams(window.location.search);
-    const preset = (p.get('quality') || 'medium').toLowerCase();
+    const preset = (p.get('quality') || 'ultra').toLowerCase();
+    //  ultra: full eye-candy, needs a dedicated GPU
+    //  high : SSAO on, soft shadows — needs mid-range GPU
+    //  medium: default — no SSAO/Bloom, 1024 shadow — runs well on iGPU / Retina laptops
+    //  low  : minimal GPU load, 512 shadow, no soft-shadow filter
     const presets = {
-      high:   { ssaa: 2,   shadowRes: 4096, ssao: true,  bloom: true,  ssaoKernel: 6 },
-      medium: { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: true,  ssaoKernel: 4 },
-      low:    { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false, ssaoKernel: 0 },
+      ultra:  { ssaa: 2,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: true,  ssaoKernel: 6, shadowEvery: 1, dpr: 2 },
+      high:   { ssaa: 1,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: false, ssaoKernel: 4, shadowEvery: 2, dpr: 1 },
+      medium: { ssaa: 1,   shadowRes: 1024, softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 3, dpr: 1 },
+      low:    { ssaa: 1,   shadowRes: 512,  softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 4, dpr: 1 },
     };
     const d = presets[preset] ?? presets.medium;
     const parseBool = (key, def) => {
@@ -1084,14 +1077,20 @@ const _renderConfig = (() => {
       return v == null ? def : !['0', 'false', 'no', 'off'].includes(v.toLowerCase());
     };
     return {
-      ssaa:       parseFloat(p.get('ssaa')   ?? d.ssaa),
-      shadowRes:  parseInt(p.get('shadow')   ?? d.shadowRes, 10),
-      ssao:       parseBool('ssao',  d.ssao),
-      bloom:      parseBool('bloom', d.bloom),
-      ssaoKernel: d.ssaoKernel,
+      ssaa:        parseFloat(p.get('ssaa')   ?? d.ssaa),
+      shadowRes:   parseInt(p.get('shadow')   ?? d.shadowRes, 10),
+      softShadow:  d.softShadow,
+      ssao:        parseBool('ssao',  d.ssao),
+      bloom:       parseBool('bloom', d.bloom),
+      ssaoKernel:  d.ssaoKernel,
+      // shadowEvery: reuse shadow map every N frames; sun never moves so >1 is safe
+      shadowEvery: parseInt(p.get('shadow_every') ?? d.shadowEvery, 10),
+      // dpr: device pixel ratio cap; 1 = logical pixels (fastest); 2 = Retina (slow!)
+      dpr: parseFloat(p.get('dpr') ?? d.dpr),
     };
   } catch {
-    return { ssaa: 1, shadowRes: 2048, ssao: true, bloom: true, ssaoKernel: 4 };
+    return { ssaa: 2, shadowRes: 2048, softShadow: true, ssao: true, bloom: true,
+             ssaoKernel: 6, shadowEvery: 1, dpr: 2 };
   }
 })();
 
@@ -1102,9 +1101,15 @@ const simContainer = window.__simulatorContainer || document.body;
 const initW = simContainer === document.body ? window.innerWidth * scale : Math.max(1, simContainer.clientWidth) * scale;
 const initH = simContainer === document.body ? window.innerHeight * scale : Math.max(1, simContainer.clientHeight) * scale;
 renderer.setSize(initW, initH, false);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Cap pixel ratio to _renderConfig.dpr (default 1).
+// DPR=2 (Retina) creates 4× more pixels per pass — the single biggest GPU cost.
+// Use ?dpr=2 or quality=ultra to enable Retina rendering.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, _renderConfig.dpr));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = _renderConfig.softShadow ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+// Throttle shadow-map recomputation: the directional light never moves, so recomputing
+// every frame is wasteful. Manually trigger every shadowEvery frames.
+renderer.shadowMap.autoUpdate = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.64; // 稍亮
@@ -1129,12 +1134,12 @@ dirLight.position.set(28, 42, 24);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.width = _renderConfig.shadowRes;
 dirLight.shadow.mapSize.height = _renderConfig.shadowRes;
-dirLight.shadow.camera.near = 0.5;
-dirLight.shadow.camera.far = 500;
-dirLight.shadow.camera.left = -55;
-dirLight.shadow.camera.right = 55;
-dirLight.shadow.camera.top = 55;
-dirLight.shadow.camera.bottom = -55;
+dirLight.shadow.camera.near = 1;
+dirLight.shadow.camera.far = 120;   // parking lot fits in ~110m; tighter frustum = better shadow precision
+dirLight.shadow.camera.left = -60;
+dirLight.shadow.camera.right = 60;
+dirLight.shadow.camera.top = 60;
+dirLight.shadow.camera.bottom = -60;
 dirLight.shadow.bias = -0.0001;
 dirLight.shadow.normalBias = 0.02;
 if (typeof dirLight.shadow.radius !== 'undefined') dirLight.shadow.radius = 6; // 柔化阴影边缘
@@ -1572,6 +1577,13 @@ let totalKwhDelivered = 0;
 const batteryStations = [];
 let parkingLot = null;
 
+// Per-frame caches of moving entities, rebuilt at the top of animate().
+// Physical check functions (isOccupiedPhysically, sweptVolumeCheckClear, …) use these
+// to avoid iterating + filtering the full arrays on every gate-wait poll.
+// Caches are at most one frame (≤16ms) stale — safe for real-time avoidance.
+let _movingRobots   = [];   // robots in navigating/returning state
+let _movingVehicles = [];   // vehicles not parked/gone
+
 // Robot battery capacity and thresholds (configurable)
 let ROBOT_BATTERY_KWH = 100;
 const VEHICLE_BATTERY_KWH = 80;
@@ -1605,6 +1617,71 @@ const debug_collision = (() => {
   }
 })();
 if (debug_collision) setDebugCollisionEnabled(true);
+
+// === Per-frame timing profiler (activate with ?debug_timing=1) ===
+const debug_timing = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get('debug_timing');
+    return v != null && ['1', 'true', 'yes', 'y'].includes(String(v).toLowerCase());
+  } catch { return false; }
+})();
+
+const TIMING_REPORT_FRAMES = 120; // print a report every ~2 seconds at 60 fps
+const _dbgSections = [
+  'entityCache',   // rebuild _movingRobots / _movingVehicles
+  'trajCleanup',   // trajectory + calibration
+  'vehicleLoop',   // vehicle occupied-position + mixer update
+  'robotLoop',     // robot mixer + battery + returnHome check
+  'graphLabels',   // updateGraphLabels (show_graph only)
+  'debugOverlay',  // debug collision overlay
+  'followCam',     // follow camera + controls.update
+  'dashboardPush', // postMessage serialisation
+  'render',        // composer.render() — GPU submit
+  'other',         // everything else (sim-time text, etc.)
+];
+const _dbgAcc   = Object.fromEntries(_dbgSections.map(k => [k, 0]));
+let   _dbgN     = 0;
+let   _dbgTotal = 0;
+
+function _dbgReport() {
+  const totalAvg  = _dbgTotal / _dbgN;
+  const fps       = totalAvg > 0 ? (1000 / totalAvg).toFixed(1) : '?';
+  const budget16  = 1000 / 60;          // 16.67 ms
+  const sumBuckets = _dbgSections.reduce((s, k) => s + _dbgAcc[k], 0) / _dbgN;
+  const gap        = Math.max(0, totalAvg - sumBuckets); // time between markers
+
+  const rows = {};
+  for (const k of _dbgSections) {
+    const avg = _dbgAcc[k] / _dbgN;
+    if (avg < 0.001) continue;  // skip zero-cost sections
+    rows[k] = {
+      'avg ms'  : avg.toFixed(3),
+      '% frame' : (avg / totalAvg * 100).toFixed(1) + '%',
+      '> budget': avg > budget16 * 0.15 ? '⚠️' : '',
+    };
+  }
+  if (gap > 0.05) {
+    rows['(between markers)'] = {
+      'avg ms'  : gap.toFixed(3),
+      '% frame' : (gap / totalAvg * 100).toFixed(1) + '%',
+      '> budget': '',
+    };
+  }
+
+  const label = `[timing] ${_dbgN}-frame avg | total ${totalAvg.toFixed(2)} ms/frame` +
+    ` | FPS ${fps} | robots ${chargingRobots.length} veh ${vehicles.length}`;
+  console.groupCollapsed(`%c${label}`, 'color:#0af;font-weight:bold');
+  console.table(rows);
+  console.log(
+    '%csimScale: ' + getSimTimeScale().toFixed(1) + '\u00d7' +
+    `  movingR:${_movingRobots.length}  movingV:${_movingVehicles.length}`,
+    'color:#888'
+  );
+  console.groupEnd();
+
+  for (const k of _dbgSections) _dbgAcc[k] = 0;
+  _dbgN = 0; _dbgTotal = 0;
+}
 
 // Vehicle model offset calibration: ?calibrate_vehicle=1 — show logical-position marker and live-adjust mesh offset
 const calibrate_vehicle = (() => {
@@ -2070,33 +2147,15 @@ class ChargingRobot {
     return mainTl;
     };
 
-    let blockStartSimTime = null;
-    let replanAttempts = 0;
+    // One-way graph: no head-on deadlocks; gate waits during movement handle real-time avoidance.
+    // Start immediately without pre-departure blocking check.
     const tryStart = () => {
       const t0 = getSimTime();
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
-      if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (blockStartSimTime === null) blockStartSimTime = t0;
-        const blockedSimDuration = t0 - blockStartSimTime;
-        // Dynamic re-planning: if blocked too long in sim time, force re-compute path via ST A*
-        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
-          replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
-          blockStartSimTime = t0; // Reset timer for new path attempt
-        }
-        setTimeoutSim(tryStart, 0.25);
-        return;
-      }
-      // Path is clear, reset tracking
-      blockStartSimTime = null;
-      replanAttempts = 0;
-      // Log the planned path
       logAgentPath(`Robot${this.id}`, wps, `CP${spot.index} (charge vehicle ${vehicle.id})`, 'charge');
-      // Reserve robot path to avoid robot-robot collisions
       releaseAgent(agentId);
       reservePath(densePath, t0, SPEED, agentId, RESERVE_WINDOW_SEC);
-      // Hold destination cell during charging to prevent stacking.
       const travelT = pathDistance(densePath) / SPEED;
       reservePoint(
         chargingPos.x,
@@ -2105,7 +2164,6 @@ class ChargingRobot {
         t0 + travelT + CHARGE_DURATION_SEC + RESERVE_WINDOW_SEC,
         agentId
       );
-      // MP resource capacity=1: reserve res_mp_i during charging window.
       reserveResource(
         mpResId(spot.index),
         Math.max(0, t0 + travelT - RESERVE_WINDOW_SEC),
@@ -2334,37 +2392,11 @@ class ChargingRobot {
     return tl;
     };
 
-    let blockStartSimTime = null;
-    let replanAttempts = 0;
+    // One-way graph: start immediately, gate waits handle real-time avoidance.
     const tryStart = () => {
       const t0 = getSimTime();
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
-      if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (blockStartSimTime === null) blockStartSimTime = t0;
-        const blockedSimDuration = t0 - blockStartSimTime;
-        if (blockedSimDuration > 1.5) {
-          console.warn(`⚠️ Robot${this.id} force leaving after ${blockedSimDuration.toFixed(1)}s sim blocked`);
-          blockStartSimTime = null;
-          replanAttempts = 0;
-          logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, recharge)`, 'return-home');
-          releaseAgent(agentId);
-          reservePath(densePath, t0, SPEED, agentId, RESERVE_WINDOW_SEC);
-          const travelT = pathDistance(densePath) / SPEED;
-          reservePoint(this.homePosition.x, this.homePosition.z, Math.max(0, t0 + travelT - RESERVE_WINDOW_SEC), t0 + travelT + DEST_HOLD_SEC + RESERVE_WINDOW_SEC, agentId);
-          runReturnHome();
-          return;
-        }
-        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
-          replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning return home (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
-          blockStartSimTime = t0;
-        }
-        setTimeoutSim(tryStart, 0.25);
-        return;
-      }
-      blockStartSimTime = null;
-      replanAttempts = 0;
       logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, recharge)`, 'return-home');
       releaseAgent(agentId);
       reservePath(densePath, t0, SPEED, agentId, RESERVE_WINDOW_SEC);
@@ -2531,8 +2563,7 @@ class ChargingRobot {
       return tl;
     };
 
-    let blockStartSimTime = null;
-    let replanAttempts = 0;
+    // One-way graph: start immediately, gate waits handle real-time avoidance.
     const tryStart = () => {
       // If a new order arrives before we even start moving, go directly.
       if (this.returnReason === 'rest' && this.pendingVehicle && this.pendingVehicle.needsCharging) {
@@ -2544,31 +2575,6 @@ class ChargingRobot {
       const t0 = getSimTime();
       computePathAndFull();
       const densePath = densifyWaypoints(fullPath);
-      if (isPathBlocked(densePath, SPEED, t0, agentId)) {
-        if (blockStartSimTime === null) blockStartSimTime = t0;
-        const blockedSimDuration = t0 - blockStartSimTime;
-        if (blockedSimDuration > 1.5) {
-          console.warn(`⚠️ Robot${this.id} force leaving to rest after ${blockedSimDuration.toFixed(1)}s sim blocked`);
-          blockStartSimTime = null;
-          replanAttempts = 0;
-          logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, rest)`, 'return-rest');
-          releaseAgent(agentId);
-          reservePath(densePath, t0, SPEED, agentId, RESERVE_WINDOW_SEC);
-          const travelT = pathDistance(densePath) / SPEED;
-          reservePoint(this.homePosition.x, this.homePosition.z, Math.max(0, t0 + travelT - RESERVE_WINDOW_SEC), t0 + travelT + DEST_HOLD_SEC + RESERVE_WINDOW_SEC, agentId);
-          runReturn();
-          return;
-        }
-        if (blockedSimDuration > REPLAN_THRESHOLD_SIM_SEC && replanAttempts < MAX_REPLAN_ATTEMPTS) {
-          replanAttempts++;
-          console.log(`🔄 Robot${this.id} re-planning return to rest (attempt ${replanAttempts}) after ${blockedSimDuration.toFixed(1)}s sim blocked`);
-          blockStartSimTime = t0;
-        }
-        setTimeoutSim(tryStart, 0.25);
-        return;
-      }
-      blockStartSimTime = null;
-      replanAttempts = 0;
       logAgentPath(`Robot${this.id}`, wps, `Home (MP${endSpot}, rest)`, 'return-rest');
       releaseAgent(agentId);
       reservePath(densePath, t0, SPEED, agentId, RESERVE_WINDOW_SEC);
@@ -4134,6 +4140,7 @@ function animate() {
   const frameStart = performance.now();
   const delta = (frameStart - lastTime) / 1000;
   lastTime = frameStart;
+  let _dbgT = debug_timing ? frameStart : 0;
 
   const LABEL_Y_OFFSET = 10; // same height as model (no offset)
 
@@ -4145,11 +4152,24 @@ function animate() {
    const pad = (n) => String(n).padStart(2, '0');
    simTimeTextEl.textContent = `Sim time  ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 
-  // Clean up trajectories for vehicles that have left the lot (removed from vehicles)
+  // Rebuild moving-entity caches once per frame.
+  // All gate-wait poll callbacks use these instead of re-filtering full arrays.
+  _movingRobots.length = 0;
+  _movingVehicles.length = 0;
+  for (const rb of chargingRobots) {
+    if (rb.model?.position && (rb.state === 'navigating' || rb.state === 'returning'))
+      _movingRobots.push(rb);
+  }
+  for (const v of vehicles) {
+    if (v.model?.position && v.phase !== 'parked' && v.phase !== 'gone')
+      _movingVehicles.push(v);
+  }
+  if (debug_timing) { _dbgAcc.entityCache += performance.now() - _dbgT; _dbgT = performance.now(); }
+
+  // Clean up trajectories for vehicles that have left the lot.
   if (vehicleTrajectories.size > 0) {
-    const activeIds = new Set(vehicles.map(v => v.id));
-    for (const [vid, rec] of vehicleTrajectories.entries()) {
-      if (!activeIds.has(vid)) {
+    for (const [vid, rec] of vehicleTrajectories) {
+      if (!vehicles.some(v => v.id === vid)) {
         if (rec.line) trajectoryGroup.remove(rec.line);
         vehicleTrajectories.delete(vid);
       }
@@ -4178,6 +4198,7 @@ function animate() {
   } else if (calibrationMarker) {
     calibrationMarker.visible = false;
   }
+  if (debug_timing) { _dbgAcc.trajCleanup += performance.now() - _dbgT; _dbgT = performance.now(); }
   // Record and draw vehicle trajectories when entering or leaving (only when show_graph is enabled)
   vehicles.forEach(vehicle => {
     if (show_graph && vehicle.model && vehicle.model.position && (vehicle.phase === 'entering' || vehicle.phase === 'leaving')) {
@@ -4237,6 +4258,7 @@ function animate() {
   
   const simDt = delta * getSimTimeScale();
 
+  if (debug_timing) { _dbgAcc.vehicleLoop += performance.now() - _dbgT; _dbgT = performance.now(); }
   vehicles.forEach(vehicle => {
     if (vehicle.chargeportMixer) vehicle.chargeportMixer.update(simDt);
   });
@@ -4246,17 +4268,18 @@ function animate() {
 
   chargingRobots.forEach(robot => {
     if (robot.model?.userData?.mixer) robot.model.userData.mixer.update(simDt);
-    // 仅把“在路上移动的机器人”视为动态障碍物；静止状态（充电 / idle / 自充电等）不计入碰撞规避
-    if (
-      robot.model &&
-      robot.model.position &&
-      (robot.state === 'navigating' || robot.state === 'returning')
-    ) {
-      collisionAvoidance.addOccupiedPosition(
-        { x: robot.model.position.x, z: robot.model.position.z },
-        `robot_${robot.id}`,
-        'caddie'
-      );
+    // 仅把"在路上移动的机器人"视为动态障碍物；静止状态（充电 / idle / 自充电等）不计入碰撞规避
+    if (robot.model?.position) {
+      if (robot.state === 'navigating' || robot.state === 'returning') {
+        collisionAvoidance.addOccupiedPosition(
+          { x: robot.model.position.x, z: robot.model.position.z },
+          `robot_${robot.id}`,
+          'caddie'
+        );
+      } else {
+        // Remove stale entry when robot stops — prevents phantom blockers in A* pathfinder
+        collisionAvoidance.removeOccupiedPosition(`robot_${robot.id}`);
+      }
     }
     if (robot.batteryLabel && robot.model && robot.model.position) {
       robot.batteryLabel.style.display = 'none'; // 暂时移除 SOC% 显示
@@ -4284,9 +4307,11 @@ function animate() {
       robot.returnHomeAndCharge(() => {});
     }
   });
-  
+  if (debug_timing) { _dbgAcc.robotLoop += performance.now() - _dbgT; _dbgT = performance.now(); }
+
   // Graph node labels (robot/vehicle/turn/spot)
   if (show_graph) updateGraphLabels();
+  if (debug_timing) { _dbgAcc.graphLabels += performance.now() - _dbgT; _dbgT = performance.now(); }
 
   if (debug_collision && isDebugCollisionEnabled()) {
     const agents = [];
@@ -4308,6 +4333,7 @@ function animate() {
     });
     updateDebugOverlay(scene, getResourceOwner, agents);
   }
+  if (debug_timing) { _dbgAcc.debugOverlay += performance.now() - _dbgT; _dbgT = performance.now(); }
 
   if (followRobotId != null) {
     const robot = chargingRobots.find((r) => r.id === followRobotId);
@@ -4318,6 +4344,7 @@ function animate() {
     }
   }
   controls.update();
+  if (debug_timing) { _dbgAcc.followCam += performance.now() - _dbgT; _dbgT = performance.now(); }
 
   // 推送到 dashboard：弹窗/iframe 内用 postMessage（独立线程不抢 rAF），同页内用 __dashboardSetState
   const inPopup = typeof window !== 'undefined' && window.opener != null;
@@ -4337,8 +4364,9 @@ function animate() {
         const vehiclesBeingCharged = new Set(robots.filter(r => r.state === 'charging' && r.targetVehicle).map(r => r.targetVehicle.id));
         const waiting = veh.filter(v => v.phase === 'parked' && v.needsCharging && !vehiclesBeingCharged.has(v.id)).length;
         const charging = vehiclesBeingCharged.size;
+        const vByOrderId = new Map(veh.map(v => [v.orderId, v]));
         const orderDetails = orders.map(o => {
-          const v = veh.find(v => v.orderId === o.id) || null;
+          const v = vByOrderId.get(o.id) || null;
           const waitTimeSec = o.recordedWaitTimeSec ?? (v && v.chargingStartedAt != null && o.createdAtSimTime != null
             ? v.chargingStartedAt - o.createdAtSimTime
             : null);
@@ -4401,7 +4429,14 @@ function animate() {
     }
   }
 
+  if (debug_timing) { _dbgAcc.dashboardPush += performance.now() - _dbgT; _dbgT = performance.now(); }
+
+  // Shadow throttle: only recompute shadow map every N frames (sun never moves).
+  // Three.js r152+: shadowMap.autoUpdate=false → manual needsUpdate trigger.
+  if (perfFrameCount % _renderConfig.shadowEvery === 0) renderer.shadowMap.needsUpdate = true;
+
   composer.render();
+  if (debug_timing) { _dbgAcc.render += performance.now() - _dbgT; _dbgT = performance.now(); }
 
   captureFrame();
 
@@ -4410,6 +4445,13 @@ function animate() {
   const workMs = frameEnd - frameStart;
   perfFrameCount++;
   perfAccumWorkMs += workMs;
+  if (debug_timing) {
+    // 'other' = captureFrame + perf-text + anything between markers not explicitly timed
+    _dbgAcc.other += performance.now() - _dbgT;
+    _dbgTotal += workMs;
+    _dbgN++;
+    if (_dbgN >= TIMING_REPORT_FRAMES) _dbgReport();
+  }
   if (frameEnd - perfLastUpdate >= 250) {
     const avgMs = perfAccumWorkMs / Math.max(1, perfFrameCount);
     const fps = avgMs > 0 ? 1000 / avgMs : 0;

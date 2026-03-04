@@ -1,7 +1,7 @@
 export type RobotStateLabel = 'active' | 'idle' | 'charging';
 
 // ── Renderer / performance settings ──────────────────────────────────────────
-export type RenderQuality = 'low' | 'medium' | 'high' | 'custom';
+export type RenderQuality = 'low' | 'medium' | 'high' | 'ultra' | 'custom';
 
 export interface RenderConfig {
   quality: RenderQuality;
@@ -9,19 +9,27 @@ export interface RenderConfig {
   ssaa: number;
   /** Shadow map size in pixels (one side) */
   shadowRes: number;
-  /** Screen-Space Ambient Occlusion */
+  /** Screen-Space Ambient Occlusion (expensive; GPU-only recommended) */
   ssao: boolean;
   /** Unreal Bloom post-process */
   bloom: boolean;
+  /** Device pixel ratio cap: 1 = logical pixels (fast), 2 = Retina/HiDPI (4× GPU cost!) */
+  dpr: number;
 }
 
+// Mirrors the presets in main_sim.js _renderConfig
 export const RENDER_PRESETS: Record<Exclude<RenderQuality, 'custom'>, Omit<RenderConfig, 'quality'>> = {
-  low:    { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false },
-  medium: { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: true  },
-  high:   { ssaa: 2,   shadowRes: 4096, ssao: true,  bloom: true  },
+  //  ultra: full quality, dedicated GPU only
+  ultra:  { ssaa: 2,   shadowRes: 2048, ssao: true,  bloom: true,  dpr: 2 },
+  //  high: SSAO on, no Bloom, 2048 shadow — mid-range GPU
+  high:   { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: false, dpr: 1 },
+  //  medium: default — fast on iGPU / Retina laptops (no SSAO/Bloom, DPR=1)
+  medium: { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false, dpr: 1 },
+  //  low: minimal GPU — targets 60fps on any hardware
+  low:    { ssaa: 1,   shadowRes: 512,  ssao: false, bloom: false, dpr: 1 },
 };
 
-export const DEFAULT_RENDER_CONFIG: RenderConfig = { quality: 'medium', ...RENDER_PRESETS.medium };
+export const DEFAULT_RENDER_CONFIG: RenderConfig = { quality: 'ultra', ...RENDER_PRESETS.ultra };
 
 export interface RobotStatus {
   id: string;
