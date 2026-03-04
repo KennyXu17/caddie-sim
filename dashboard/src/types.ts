@@ -15,21 +15,28 @@ export interface RenderConfig {
   bloom: boolean;
   /** Device pixel ratio cap: 1 = logical pixels (fast), 2 = Retina/HiDPI (4× GPU cost!) */
   dpr: number;
+  /** Shadow map recomputed every N frames (sun is static so >1 is safe) */
+  shadowEvery: number;
+  /** Whether vehicle models cast shadows (each +~1 ms GPU/frame) */
+  vehicleShadow: boolean;
+  /** Whether robot models cast shadows */
+  robotShadow: boolean;
 }
 
 // Mirrors the presets in main_sim.js _renderConfig
 export const RENDER_PRESETS: Record<Exclude<RenderQuality, 'custom'>, Omit<RenderConfig, 'quality'>> = {
   //  ultra: full quality, dedicated GPU only
-  ultra:  { ssaa: 2,   shadowRes: 2048, ssao: true,  bloom: true,  dpr: 2 },
+  ultra:  { ssaa: 2, shadowRes: 2048, ssao: true,  bloom: true,  dpr: 2, shadowEvery: 4, vehicleShadow: true,  robotShadow: true  },
   //  high: SSAO on, no Bloom, 2048 shadow — mid-range GPU
-  high:   { ssaa: 1,   shadowRes: 2048, ssao: true,  bloom: false, dpr: 1 },
+  high:   { ssaa: 1, shadowRes: 2048, ssao: true,  bloom: false, dpr: 1, shadowEvery: 4, vehicleShadow: false, robotShadow: false },
   //  medium: default — fast on iGPU / Retina laptops (no SSAO/Bloom, DPR=1)
-  medium: { ssaa: 1,   shadowRes: 1024, ssao: false, bloom: false, dpr: 1 },
+  medium: { ssaa: 1, shadowRes: 1024, ssao: false, bloom: false, dpr: 1, shadowEvery: 4, vehicleShadow: false, robotShadow: false },
   //  low: minimal GPU — targets 60fps on any hardware
-  low:    { ssaa: 1,   shadowRes: 512,  ssao: false, bloom: false, dpr: 1 },
+  low:    { ssaa: 1, shadowRes: 512,  ssao: false, bloom: false, dpr: 1, shadowEvery: 6, vehicleShadow: false, robotShadow: false },
 };
 
 export const DEFAULT_RENDER_CONFIG: RenderConfig = { quality: 'ultra', ...RENDER_PRESETS.ultra };
+
 
 export interface RobotStatus {
   id: string;

@@ -1066,10 +1066,10 @@ const _renderConfig = (() => {
     //  medium: default — no SSAO/Bloom, 1024 shadow — runs well on iGPU / Retina laptops
     //  low  : minimal GPU load, 512 shadow, no soft-shadow filter
     const presets = {
-      ultra:  { ssaa: 2,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: true,  ssaoKernel: 6, shadowEvery: 1, dpr: 2 },
-      high:   { ssaa: 1,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: false, ssaoKernel: 4, shadowEvery: 2, dpr: 1 },
-      medium: { ssaa: 1,   shadowRes: 1024, softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 3, dpr: 1 },
-      low:    { ssaa: 1,   shadowRes: 512,  softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 4, dpr: 1 },
+      ultra:  { ssaa: 2,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: true,  ssaoKernel: 6, shadowEvery: 4, dpr: 2, vehicleShadow: true,  robotShadow: true  },
+      high:   { ssaa: 1,   shadowRes: 2048, softShadow: true,  ssao: true,  bloom: false, ssaoKernel: 4, shadowEvery: 4, dpr: 1, vehicleShadow: false, robotShadow: false },
+      medium: { ssaa: 1,   shadowRes: 1024, softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 4, dpr: 1, vehicleShadow: false, robotShadow: false },
+      low:    { ssaa: 1,   shadowRes: 512,  softShadow: false, ssao: false, bloom: false, ssaoKernel: 0, shadowEvery: 6, dpr: 1, vehicleShadow: false, robotShadow: false },
     };
     const d = presets[preset] ?? presets.medium;
     const parseBool = (key, def) => {
@@ -1087,10 +1087,13 @@ const _renderConfig = (() => {
       shadowEvery: parseInt(p.get('shadow_every') ?? d.shadowEvery, 10),
       // dpr: device pixel ratio cap; 1 = logical pixels (fastest); 2 = Retina (slow!)
       dpr: parseFloat(p.get('dpr') ?? d.dpr),
+      // vehicleShadow / robotShadow: whether dynamic models cast shadows (big GPU cost)
+      vehicleShadow: parseBool('vehicle_shadow', d.vehicleShadow),
+      robotShadow:   parseBool('robot_shadow',   d.robotShadow),
     };
   } catch {
     return { ssaa: 2, shadowRes: 2048, softShadow: true, ssao: true, bloom: true,
-             ssaoKernel: 6, shadowEvery: 1, dpr: 2 };
+             ssaoKernel: 6, shadowEvery: 4, dpr: 2, vehicleShadow: true, robotShadow: true };
   }
 })();
 
@@ -2766,7 +2769,7 @@ robotPositions.forEach((pos, idx) => {
       if (gltf.animations?.length) console.log(`   Animations: ${gltf.animations.length} clip(s): ${gltf.animations.map(c => c.name).join(', ')}`);
       robotModel.traverse((obj) => {
         if (obj.isMesh) {
-          obj.castShadow = true;
+          obj.castShadow = _renderConfig.robotShadow;
           obj.receiveShadow = true;
           
           // Optimize PBR material configuration - preserve original PBR properties
@@ -2870,7 +2873,7 @@ robotPositions.forEach((pos, idx) => {
           const chargeHeadingAtHome = homeSpot ? ((homeSpot.opening === '+z') ? ROBOT_ROT_EXTRA : (Math.PI + ROBOT_ROT_EXTRA)) : Math.PI;
           robotModel.rotation.y = chargeHeadingAtHome;
           robotModel.traverse((obj) => {
-            if (obj.isMesh) obj.castShadow = true;
+            if (obj.isMesh) obj.castShadow = _renderConfig.robotShadow;
           });
           reduceReflections(robotModel, 0.3);
           scene.add(robotModel);
@@ -3288,7 +3291,7 @@ function createVehicleSequence() {
         car.rotation.y = Math.PI + Math.PI / 2;
         carMesh.traverse((obj) => {
           if (obj.isMesh) {
-            obj.castShadow = true;
+            obj.castShadow = _renderConfig.vehicleShadow;
             obj.receiveShadow = true;
           }
         });

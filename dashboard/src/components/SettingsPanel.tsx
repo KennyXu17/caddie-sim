@@ -51,6 +51,12 @@ const DPR_OPTIONS = [
   { label: '1×  logical px (fast)', value: 1 },
   { label: '2×  Retina / HiDPI',   value: 2 },
 ];
+const SHADOW_EVERY_OPTIONS = [
+  { label: 'Every frame  (max quality)',  value: 1 },
+  { label: 'Every 2 frames',              value: 2 },
+  { label: 'Every 4 frames  (default)',   value: 4 },
+  { label: 'Every 6 frames  (fastest)',   value: 6 },
+];
 
 // ── Props ───────────────────────────────────────────────────────────────────
 interface SettingsPanelProps {
@@ -206,6 +212,55 @@ export function SettingsPanel({
               />
             </Tooltip>
           </Box>
+
+          {/* Vehicle shadow + Robot shadow toggles */}
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 0.5 }}>
+            <Tooltip title="Vehicle cast-shadows. Each vehicle adds ~1 ms/frame GPU cost. Disable for max performance." placement="left" arrow>
+              <FormControlLabel
+                control={
+                  <Switch
+                    size="small"
+                    checked={renderConfig.vehicleShadow}
+                    onChange={(e) => patchRender({ vehicleShadow: e.target.checked })}
+                    color="primary"
+                  />
+                }
+                label={<Typography variant="caption">Car shadow</Typography>}
+                sx={{ mr: 0 }}
+              />
+            </Tooltip>
+            <Tooltip title="Robot cast-shadows. Minor GPU cost." placement="left" arrow>
+              <FormControlLabel
+                control={
+                  <Switch
+                    size="small"
+                    checked={renderConfig.robotShadow}
+                    onChange={(e) => patchRender({ robotShadow: e.target.checked })}
+                    color="primary"
+                  />
+                }
+                label={<Typography variant="caption">Robot shadow</Typography>}
+                sx={{ mr: 0 }}
+              />
+            </Tooltip>
+          </Box>
+
+          {/* Shadow update frequency */}
+          <Tooltip title="How often the shadow map is recomputed. The sun is static so every 4 frames is indistinguishable from every frame." placement="left" arrow>
+            <FormControl size="small" fullWidth>
+              <InputLabel id="shadow-every-label">Shadow update</InputLabel>
+              <Select
+                labelId="shadow-every-label"
+                value={renderConfig.shadowEvery}
+                label="Shadow update"
+                onChange={(e) => patchRender({ shadowEvery: Number(e.target.value) })}
+              >
+                {SHADOW_EVERY_OPTIONS.map((o) => (
+                  <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Tooltip>
 
           {/* Device pixel ratio */}
           <Tooltip title="Pixel ratio: 2× (Retina) renders 4× more pixels — massive GPU cost. Use 1× unless you need crisp screenshots." placement="left" arrow>

@@ -25,9 +25,12 @@ function buildSimUrl(rc: RenderConfig): string {
   base.searchParams.set('quality', rc.quality === 'custom' ? 'medium' : rc.quality);
   base.searchParams.set('ssaa',   String(rc.ssaa));
   base.searchParams.set('shadow', String(rc.shadowRes));
-  base.searchParams.set('ssao',   rc.ssao  ? '1' : '0');
-  base.searchParams.set('bloom',  rc.bloom ? '1' : '0');
-  base.searchParams.set('dpr',    String(rc.dpr));
+  base.searchParams.set('ssao',           rc.ssao  ? '1' : '0');
+  base.searchParams.set('bloom',          rc.bloom ? '1' : '0');
+  base.searchParams.set('dpr',            String(rc.dpr));
+  base.searchParams.set('shadow_every',   String(rc.shadowEvery));
+  base.searchParams.set('vehicle_shadow', rc.vehicleShadow ? '1' : '0');
+  base.searchParams.set('robot_shadow',   rc.robotShadow   ? '1' : '0');
   return base.href;
 }
 
