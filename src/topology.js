@@ -155,8 +155,8 @@ function buildGraph() {
       row,
       side
     });
-    // Cxx_0：充电动画前靠近点，由原 Ci 沿 x 方向 0.4 米（开口 -z 为 +x，开口 +z 为 -x）
-    const APPROACH_DIST = 0.4;
+    // Cxx_0：充电动画前靠近点，由原 Ci 沿 x 方向 0.13 米（开口 -z 为 +x，开口 +z 为 -x）
+    const APPROACH_DIST = 0.25;
     const approachDx = spot.opening === '-z' ? APPROACH_DIST : -APPROACH_DIST;
     const c0id = charge0Id(spot.index);
     nodes.set(c0id, {
@@ -599,7 +599,7 @@ export function getCharge0Position(spotIndex) {
   const spot = PARKING_SPOTS.find(s => s.index === spotIndex);
   if (!spot || !spot.chargePoint) return null;
   const cp = spot.chargePoint;
-  const APPROACH_DIST = 0.4;
+  const APPROACH_DIST = 0.13;
   const approachDx = spot.opening === '-z' ? APPROACH_DIST : -APPROACH_DIST;
   return { x: cp.x + approachDx, z: cp.z, y: cp.y != null ? cp.y : 0 };
 }

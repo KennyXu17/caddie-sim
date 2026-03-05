@@ -75,8 +75,8 @@ function buildParkingSpots() {
       const cx = minX + w / 2;
       const cz = (row.minZ + row.maxZ) / 2;
 
-      // C_i（充电点）：由 S_i（车位中心）沿开口方向距离 2.7
-      const CI_DIST = 2.7;
+      // C_i（充电点）：由 S_i（车位中心）沿开口方向距离 2.48
+      const CI_DIST = 2.58;
       const chargeZ = row.opening === '+z' ? cz + CI_DIST : cz - CI_DIST;
 
       spots.push({
