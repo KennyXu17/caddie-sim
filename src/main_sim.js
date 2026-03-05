@@ -3278,7 +3278,7 @@ function createVehicleSequence() {
         // Use gltf.scene directly (do not clone) so AnimationClips work (they reference object UUIDs)
         const carMesh = gltf.scene;
         // 把模型原点移到车体中心：用包围盒计算几何中心，mesh 偏移使 Group 原点在 XZ 中心、车底在场景 y=0 接地
-        const VEHICLE_REF_Y = 0.9; // car.position.y，车体参考点高度；地面 y=0，车底应对齐 0
+        const VEHICLE_REF_Y = 0.92; // car.position.y，车体参考点高度；地面 y=0，车底应对齐 0
         const box = new THREE.Box3().setFromObject(carMesh);
         const center = box.getCenter(new THREE.Vector3());
         const meshOffset = calibrate_vehicle
