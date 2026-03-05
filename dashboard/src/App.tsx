@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ThemeProvider, CssBaseline, Box, Paper, Typography, Button } from '@mui/material';
+import { ThemeProvider, CssBaseline, Box, Paper, Typography, Button, Tooltip } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
+import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import StopCircleIcon from '@mui/icons-material/StopCircle';
 import { dashboardTheme } from './theme';
 import { FleetStatusCards } from './components/FleetStatusCards';
 import { SOCPanel } from './components/SOCPanel';
@@ -40,6 +42,63 @@ export default function App() {
   const checkClosedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [simRunning, setSimRunning] = useState(false);
   const [simState, setSimState] = useState<SimulatorState | null>(null);
+
+  // ── Screen recording ──────────────────────────────────────────────────────
+  const [recording, setRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: false,
+      });
+      streamRef.current = stream;
+      chunksRef.current = [];
+
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+        ? 'video/webm;codecs=vp9'
+        : 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.href = url;
+        a.download = `caddie-sim-${ts}.webm`;
+        a.click();
+        URL.revokeObjectURL(url);
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        setRecording(false);
+      };
+
+      // Stop recording automatically if user closes the share dialog / stream ends
+      stream.getVideoTracks()[0].addEventListener('ended', () => {
+        if (recorder.state !== 'inactive') recorder.stop();
+      });
+
+      recorder.start(500); // collect a chunk every 500 ms
+      setRecording(true);
+    } catch {
+      // User cancelled the screen-picker — do nothing
+    }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  }, []);
 
   // Render config — configured before launch, passed as URL query params
   const [renderConfig, setRenderConfig] = useState<RenderConfig>(DEFAULT_RENDER_CONFIG);
@@ -186,6 +245,27 @@ export default function App() {
             Fleet monitoring
           </Typography>
           <Box sx={{ flex: 1 }} />
+
+          {/* Record button */}
+          <Tooltip
+            title={recording ? 'Stop recording & save WebM' : 'Record screen (select "Entire screen" or the sim window)'}
+            placement="bottom"
+            arrow
+          >
+            <Button
+              size="small"
+              variant={recording ? 'contained' : 'outlined'}
+              color="error"
+              startIcon={recording
+                ? <StopCircleIcon sx={{ animation: 'recPulse 1s ease-in-out infinite', '@keyframes recPulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.4 } } }} />
+                : <FiberManualRecordIcon />}
+              onClick={recording ? stopRecording : startRecording}
+              sx={{ fontFamily: 'JetBrains Mono', fontSize: 12, mr: 1 }}
+            >
+              {recording ? 'Stop REC' : 'REC'}
+            </Button>
+          </Tooltip>
+
           {simRunning ? (
             <Button
               size="small"
