@@ -564,17 +564,15 @@ function sweptVolumeCheckClear(robot, toP, agentId, speed, safetyBuffer = SAFETY
     return null;
   };
 
-  // Use per-frame caches: only moving entities participate in swept-volume prediction.
+  // Robot-robot swept-volume check only.
+  // Vehicle conflicts are handled proactively via the reservation table (willBeOccupiedByVehicleNear)
+  // before the robot commits to moving toward the next node, so reactive vehicle capsule detection
+  // here is no longer needed and would cause false positives (stopping when a vehicle is nearby
+  // but not heading toward the robot's next waypoint).
   for (const rb of _movingRobots) {
     const otherId = `robot_${rb.id}`;
     const heading = rb.model.rotation?.y ?? 0;
     const blocker = checkOther(rb.model.position, otherId, false, heading, ROBOT_CAPSULE_HALFLEN, ROBOT_CAPSULE_R);
-    if (blocker) return { clear: false, blocker };
-  }
-  for (const v of _movingVehicles) {
-    const otherId = `vehicle_${v.id}`;
-    const heading = v.model.rotation?.y ?? 0;
-    const blocker = checkOther(v.model.position, otherId, true, heading, VEHICLE_CAPSULE_HALFLEN, VEHICLE_CAPSULE_R);
     if (blocker) return { clear: false, blocker };
   }
   return { clear: true };
@@ -695,6 +693,47 @@ function addGateWaitBeforeConflict(tl, x, z, agentId, horizonSec = 3, radiusCell
       // Timeout-based deadlock recovery
       if (Date.now() - waitStart > GATE_TIMEOUT_MS) {
         console.warn(`⚠️ ${agentId} conflict gate timeout at (${x.toFixed(1)}, ${z.toFixed(1)}), forcing resume`);
+        tl.resume();
+        return;
+      }
+      if (checkSafe()) {
+        tl.resume();
+        return;
+      }
+      setTimeoutSim(poll, pollMs / 1000);
+    };
+    setTimeoutSim(poll, pollMs / 1000);
+  });
+}
+
+/**
+ * CF 过街统一 Gate：机器人在 turn 节点等待，直到满足以下两个条件才允许穿越：
+ *   1. CF 附近 PHYSICAL_RADIUS 米内无移动中的车辆（物理实时检查）
+ *   2. 未来 HORIZON_SEC 秒内 CF 附近 RESERVE_RADIUS_CELLS 格（= 10m）无车辆预定
+ * 替代原来 addApproachCFWaitingRule + addGateWaitBeforeConflict 的两层复杂逻辑，
+ * 不依赖 fromId 白名单，对所有方向的 CF 入口一视同仁。
+ */
+function addGateWaitBeforeCFCrossing(tl, cfX, cfZ, agentId, pollMs = 150) {
+  if (!tl) return;
+  const PHYSICAL_RADIUS = 10;           // 物理检查半径（米）
+  const HORIZON_SEC = 4;                // 预定表预判时长（仿真秒）
+  const RESERVE_RADIUS_CELLS = Math.ceil(PHYSICAL_RADIUS / CELL_SIZE); // 10m / 2m = 5 cells
+  tl.call(() => {
+    const checkSafe = () => {
+      // 1. 物理检查：附近 10m 内无移动车辆
+      if (isVehicleNearPhysically(cfX, cfZ, PHYSICAL_RADIUS)) return false;
+      // 2. 预定表检查：未来 4s 内 CF 区域无车辆
+      const t = getSimTime();
+      if (willBeOccupiedByVehicleNear(cfX, cfZ, t, t + HORIZON_SEC, RESERVE_RADIUS_CELLS, agentId)) return false;
+      return true;
+    };
+    if (checkSafe()) return;
+    tl.pause();
+    const waitStart = Date.now();
+    const poll = () => {
+      if (!tl || !tl.paused()) return;
+      if (Date.now() - waitStart > GATE_TIMEOUT_MS) {
+        console.warn(`⚠️ ${agentId} CF crossing gate timeout at (${cfX.toFixed(1)}, ${cfZ.toFixed(1)}), forcing resume`);
         tl.resume();
         return;
       }
@@ -1993,10 +2032,9 @@ class ChargingRobot {
         const to = wps[i];
         const fromP = toPos(from);
         const toP = toPos(to);
-        // Before entering conflict point (CF), apply approach-specific waiting rules first (wait at current R:turn).
+        // Before entering conflict point (CF): wait at the current turn node until CF area is clear.
         if (to?.type === 'conflict') {
-          addApproachCFWaitingRule(mainTl, from, to, agentId);
-          addGateWaitBeforeConflict(mainTl, toP.x, toP.z, agentId, 3, 1, 120);
+          addGateWaitBeforeCFCrossing(mainTl, toP.x, toP.z, agentId);
         } else {
           // 进入下一节点前：若当前在 Cxx_0 则等整段 (R:MPx->下一节点) 无其他机器人；否则仅当下一节点为 R:MP 时等该 MP 无机器人（进入 R:MP9 只判 R:MP9，不判 C9_0）
           if (from?.type === 'conflict') {
@@ -2382,8 +2420,7 @@ class ChargingRobot {
       const fromP = toPos(from);
       const toP = toPos(to);
       if (to?.type === 'conflict') {
-        addApproachCFWaitingRule(tl, from, to, agentId);
-        addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 120);
+        addGateWaitBeforeCFCrossing(tl, toP.x, toP.z, agentId);
         } else {
           if (from?.type === 'conflict') {
             // Never pause at a CF node waiting for the next node — stopping in the vehicle lane is dangerous.
@@ -2556,8 +2593,7 @@ class ChargingRobot {
         const fromP = toPos(from);
         const toP = toPos(to);
         if (to?.type === 'conflict') {
-          addApproachCFWaitingRule(tl, from, to, agentId);
-          addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 120);
+          addGateWaitBeforeCFCrossing(tl, toP.x, toP.z, agentId);
         } else {
           if (from?.type === 'conflict') {
             // Never pause at a CF node waiting for the next node — stopping in the vehicle lane is dangerous.
