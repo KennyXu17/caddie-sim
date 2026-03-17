@@ -2678,7 +2678,7 @@ texLoader.load(
 // === Load Background Building (Treasure Island) ===
 loader.load(
   // '/Treasure_Island_3.glb',
-  'Treasure_Island_Parking_Lot_resize_.glb',
+  'Treasure_Island_Parking_Lot_resize_0318.glb',
   (gltf) => {
     const bg = gltf.scene;
     bg.scale.set(0.27, 0.27, 0.27);
