@@ -595,10 +595,11 @@ function addGateWaitUntilNextNodeClear(tl, toP, agentId, radius = 1.0, pollMs = 
   if (!tl || !toP) return;
   tl.call(() => {
     const checkClear = () => {
-      // Check reservation table first: will a vehicle occupy the target node in the next 4 sim-seconds?
-      // This prevents the robot from walking into a cell that a vehicle will cross (e.g. entering a parking spot).
+      // Check reservation table: will a vehicle occupy the exact cell of the target node in the next 4 sim-seconds?
+      // Use radiusCells=0 so we only block when a vehicle's path actually crosses our next node,
+      // not when a vehicle passes through a nearby cell (e.g. on an adjacent lane).
       const t = getSimTime();
-      if (willBeOccupiedByVehicleNear(toP.x, toP.z, t, t + 4, 1, agentId)) {
+      if (willBeOccupiedByVehicleNear(toP.x, toP.z, t, t + 4, 0, agentId)) {
         return { clear: false, blocker: { pos: toP, isVehicle: true } };
       }
       if (robot) {
@@ -755,9 +756,9 @@ function addGateWaitForCiToMP(tl, fromCi, toMP, SPEED, agentId, pollMs = 200) {
       const t = getSimTime();
       const pathFree = !isPathBlocked([fromCi, toMP], SPEED, t, agentId);
       const mpFree = !isOccupiedPhysically(toMP.x, toMP.z, agentId, 1.0);
-      // Also ensure no vehicle will cross the R:MP zone in the next 6 sim-seconds (longer horizon
-      // because the robot is still at Ci — a safe position — and can afford to wait here).
-      const noVehicleComing = !willBeOccupiedByVehicleNear(toMP.x, toMP.z, t, t + 6, 1, agentId);
+      // Also ensure no vehicle will cross the exact R:MP cell in the next 6 sim-seconds (radiusCells=0
+      // so we only block when a vehicle's path actually crosses this R:MP, not nearby passing traffic).
+      const noVehicleComing = !willBeOccupiedByVehicleNear(toMP.x, toMP.z, t, t + 6, 0, agentId);
       return pathFree && mpFree && noVehicleComing;
     };
     if (checkFree()) return;
