@@ -597,6 +597,12 @@ function addGateWaitUntilNextNodeClear(tl, toP, agentId, radius = 1.0, pollMs = 
   if (!tl || !toP) return;
   tl.call(() => {
     const checkClear = () => {
+      // Check reservation table first: will a vehicle occupy the target node in the next 4 sim-seconds?
+      // This prevents the robot from walking into a cell that a vehicle will cross (e.g. entering a parking spot).
+      const t = getSimTime();
+      if (willBeOccupiedByVehicleNear(toP.x, toP.z, t, t + 4, 1, agentId)) {
+        return { clear: false, blocker: { pos: toP, isVehicle: true } };
+      }
       if (robot) {
         const r = sweptVolumeCheckClear(robot, toP, agentId, speed);
         if (!r.clear) return { clear: false, blocker: r.blocker };
@@ -710,7 +716,10 @@ function addGateWaitForCiToMP(tl, fromCi, toMP, SPEED, agentId, pollMs = 200) {
       const t = getSimTime();
       const pathFree = !isPathBlocked([fromCi, toMP], SPEED, t, agentId);
       const mpFree = !isOccupiedPhysically(toMP.x, toMP.z, agentId, 1.0);
-      return pathFree && mpFree;
+      // Also ensure no vehicle will cross the R:MP zone in the next 6 sim-seconds (longer horizon
+      // because the robot is still at Ci — a safe position — and can afford to wait here).
+      const noVehicleComing = !willBeOccupiedByVehicleNear(toMP.x, toMP.z, t, t + 6, 1, agentId);
+      return pathFree && mpFree && noVehicleComing;
     };
     if (checkFree()) return;
     tl.pause();
@@ -981,8 +990,8 @@ function addApproachCFWaitingRule(tl, fromWp, toWp, agentId) {
         if (isVehicleNearPhysically(p.x, p.z, 2.0)) {
           return false;
         }
-        // Check for future vehicle reservations (radius 1 cell)
-        if (willBeOccupiedByVehicleNear(p.x, p.z, t, t + horizonSec, 1, agentId)) {
+        // Check for future vehicle reservations (radius 2 cells = 4m for better coverage)
+        if (willBeOccupiedByVehicleNear(p.x, p.z, t, t + horizonSec, 2, agentId)) {
           return false;
         }
       }
@@ -1990,7 +1999,10 @@ class ChargingRobot {
           addGateWaitBeforeConflict(mainTl, toP.x, toP.z, agentId, 3, 1, 120);
         } else {
           // 进入下一节点前：若当前在 Cxx_0 则等整段 (R:MPx->下一节点) 无其他机器人；否则仅当下一节点为 R:MP 时等该 MP 无机器人（进入 R:MP9 只判 R:MP9，不判 C9_0）
-          if (from?.type === 'charge0') {
+          if (from?.type === 'conflict') {
+            // Robot just crossed a CF node — never pause here waiting for the next node.
+            // The pre-CF gates already ensured it was safe to cross; stopping at CF is dangerous.
+          } else if (from?.type === 'charge0') {
             const fromMP = getMovePointPosition(from.spotIndex);
             if (fromMP) addGateWaitUntilSegmentClear(mainTl, fromMP, toP, agentId);
           } else if (to?.type !== 'charge0') {
@@ -2373,7 +2385,9 @@ class ChargingRobot {
         addApproachCFWaitingRule(tl, from, to, agentId);
         addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 120);
         } else {
-          if (from?.type === 'charge0') {
+          if (from?.type === 'conflict') {
+            // Never pause at a CF node waiting for the next node — stopping in the vehicle lane is dangerous.
+          } else if (from?.type === 'charge0') {
             const fromMP = getMovePointPosition(from.spotIndex);
             if (fromMP) addGateWaitUntilSegmentClear(tl, fromMP, toP, agentId);
           } else if (to?.type !== 'charge0') {
@@ -2545,7 +2559,9 @@ class ChargingRobot {
           addApproachCFWaitingRule(tl, from, to, agentId);
           addGateWaitBeforeConflict(tl, toP.x, toP.z, agentId, 3, 1, 120);
         } else {
-          if (from?.type === 'charge0') {
+          if (from?.type === 'conflict') {
+            // Never pause at a CF node waiting for the next node — stopping in the vehicle lane is dangerous.
+          } else if (from?.type === 'charge0') {
             const fromMP = getMovePointPosition(from.spotIndex);
             if (fromMP) addGateWaitUntilSegmentClear(tl, fromMP, toP, agentId);
           } else if (to?.type !== 'charge0') {
