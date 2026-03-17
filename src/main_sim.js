@@ -2678,7 +2678,7 @@ texLoader.load(
 // === Load Background Building (Treasure Island) ===
 loader.load(
   // '/Treasure_Island_3.glb',
-  'Treasure_Island_Parking_Lot_resize_0318.glb',
+  'Treasure Island Parking Lot_resize 9.glb',
   (gltf) => {
     const bg = gltf.scene;
     bg.scale.set(0.27, 0.27, 0.27);
@@ -2750,7 +2750,7 @@ robotPositions.forEach((pos, idx) => {
   console.log(`   Position: (${pos.x}, ${pos.y}, ${pos.z})`);
   
   loader.load(
-      '/Caddie_with_Arm_animation_nopipe.glb',
+      '/Caddie_with_Arm_animation 7.glb',
       (gltf) => {
         console.log(`✅ Robot ${idx + 1} model loaded successfully`);
         console.log(`   Scene has ${gltf.scene.children.length} children`);
